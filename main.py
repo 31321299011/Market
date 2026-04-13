@@ -4,170 +4,80 @@ import json
 import logging
 import re
 import time
+import random
+import string
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ===================== কনফিগারেশন =====================
+# ===================== কনফিগ =====================
 TOKEN = "8592158247:AAG_Bd1ZxdsPqgn5GuVRkCNP7jzJEVFXF-Q"
 JSONBIN_MASTER_KEY = "$2a$10$Q.jxca3Wg3HLncJRJeBsF.XceuKNM6RFay0f3JE7WpalVC/G7I5S."
 JSONBIN_BIN_ID = "69dc964236566621a8a94516"
+BOT_USERNAME = "@market_bajar_bot"
 
-# API URLs
 JSONBIN_READ = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}/latest"
 JSONBIN_WRITE = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
 
-# লগিং
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ===================== ভাষার ডাটাবেস =====================
-LANGUAGES = {
-    "bn": {
-        "name": "বাংলা", "flag": "🇧🇩",
-        "welcome": "🌟 *ক্রিপ্টো মার্কেট বটে স্বাগতম!* 🌟\n\nআমি দুনিয়ার সব কয়েনের লাইভ দাম দেখাই (USD/BDT)। নিচের বাটন ব্যবহার করো।",
-        "prices": "💰 লাইভ দাম",
-        "search": "🔍 কয়েন সার্চ",
-        "converter": "🔄 কনভার্টার",
-        "language": "🌍 ভাষা",
-        "developer": "👨‍💻 ডেভেলপার",
-        "statistics": "📊 পরিসংখ্যান",
-        "help": "❓ সাহায্য",
-        "back": "◀️ পেছনে",
-        "menu": "🌟 মেনু",
-        "price_fetch": "🔄 লাইভ দাম আনা হচ্ছে...",
-        "search_prompt": "🔍 যেকোনো কয়েনের নাম লিখুন:\nযেমন: `/search bitcoin` বা `/search dogecoin`",
-        "not_found": "❌ কয়েনটি পাওয়া যায়নি! সঠিক নাম দিন।",
-        "error": "⚠️ টেকনিক্যাল এরর! পরে চেষ্টা করুন।",
-        "calc_usage": "📝 ব্যবহার: `/cal 100 usd to bdt`\nউদাহরণ: `/cal 1 btc to usd`",
-        "calc_result": "✅ *রূপান্তর ফলাফল*\n\n{amount} {from_curr} = {result:.8f} {to_curr}",
-        "dev_info": "👨‍💻 *ডেভেলপার তথ্য*\n\n• @jhgmaing\n• @bot_developer_io\n\n📅 ভার্সন: 3.0 (মেগা প্রো)\n⚡ API: CoinGecko + ফ্যালব্যাক\n💾 ডাটাবেস: JSONBin\n🚀 হোস্ট: Render",
-        "stats_text": "📊 *বট পরিসংখ্যান*\n\n👥 মোট ইউজার: {users}\n🌍 ভাষা: ৪টি (বাংলা, ইংরেজি, রুশ, হিন্দি)\n⚡ স্ট্যাটাস: সচল\n🕐 সর্বশেষ আপডেট: {time}",
-        "help_text": "❓ *সাহায্য মেনু*\n\n/prices – টপ ২০ কয়েনের দাম\n/search <কয়েন> – যেকোনো কয়েন সার্চ\n/cal – কনভার্টার (USD/BDT/ক্রিপ্টো)\n/lang – ভাষা পরিবর্তন\n/developer – বট তথ্য\n/stats – পরিসংখ্যান\n/help – এই মেনু\n\n💡 উদাহরণ: `/search shiba inu`\n📞 সাপোর্ট: @jhgmaing"
-    },
-    "en": {
-        "name": "English", "flag": "🇬🇧",
-        "welcome": "🌟 *Welcome to Crypto Market Bot!* 🌟\n\nI show live prices of any coin in USD/BDT. Use buttons below.",
-        "prices": "💰 Live Prices",
-        "search": "🔍 Search Coin",
-        "converter": "🔄 Converter",
-        "language": "🌍 Language",
-        "developer": "👨‍💻 Developer",
-        "statistics": "📊 Stats",
-        "help": "❓ Help",
-        "back": "◀️ Back",
-        "menu": "🌟 Menu",
-        "price_fetch": "🔄 Fetching live prices...",
-        "search_prompt": "🔍 Type any coin name:\ne.g. `/search bitcoin` or `/search dogecoin`",
-        "not_found": "❌ Coin not found! Check the name.",
-        "error": "⚠️ Technical error! Try again later.",
-        "calc_usage": "📝 Usage: `/cal 100 usd to bdt`\nExample: `/cal 1 btc to usd`",
-        "calc_result": "✅ *Conversion Result*\n\n{amount} {from_curr} = {result:.8f} {to_curr}",
-        "dev_info": "👨‍💻 *Developer Info*\n\n• @jhgmaing\n• @bot_developer_io\n\n📅 Version: 3.0 (Mega Pro)\n⚡ API: CoinGecko + Fallback\n💾 Database: JSONBin\n🚀 Host: Render",
-        "stats_text": "📊 *Bot Statistics*\n\n👥 Total Users: {users}\n🌍 Languages: 4 (Bengali, English, Russian, Hindi)\n⚡ Status: Active\n🕐 Last Update: {time}",
-        "help_text": "❓ *Help Menu*\n\n/prices – Top 20 coins\n/search <coin> – Search any coin\n/cal – Converter (USD/BDT/Crypto)\n/lang – Change language\n/developer – Bot info\n/stats – Statistics\n/help – This menu\n\n💡 Example: `/search shiba inu`\n📞 Support: @jhgmaing"
-    },
-    "ru": {
-        "name": "Русский", "flag": "🇷🇺",
-        "welcome": "🌟 *Добро пожаловать в Crypto Market Bot!* 🌟\n\nЯ показываю живые цены любой монеты в USD/BDT. Используйте кнопки.",
-        "prices": "💰 Цены",
-        "search": "🔍 Поиск",
-        "converter": "🔄 Конвертер",
-        "language": "🌍 Язык",
-        "developer": "👨‍💻 Разраб",
-        "statistics": "📊 Стат",
-        "help": "❓ Помощь",
-        "back": "◀️ Назад",
-        "menu": "🌟 Меню",
-        "price_fetch": "🔄 Получение цен...",
-        "search_prompt": "🔍 Введите название монеты:\nнапример: `/search bitcoin`",
-        "not_found": "❌ Монета не найдена!",
-        "error": "⚠️ Ошибка! Попробуйте позже.",
-        "calc_usage": "📝 Использование: `/cal 100 usd to bdt`",
-        "calc_result": "✅ *Результат*\n\n{amount} {from_curr} = {result:.8f} {to_curr}",
-        "dev_info": "👨‍💻 *Разработчик*\n\n@jhgmaing\n@bot_developer_io\n\nВерсия 3.0\nAPI: CoinGecko",
-        "stats_text": "📊 *Статистика*\n\n👥 Пользователей: {users}\n🌍 Языков: 4\n⚡ Статус: Активен\n🕐 {time}",
-        "help_text": "❓ *Помощь*\n\n/prices – Топ 20 монет\n/search <монета> – Поиск\n/cal – Конвертер\n/lang – Язык\n/developer – Инфо\n/stats – Статистика\n/help – Меню"
-    },
-    "hi": {
-        "name": "हिन्दी", "flag": "🇮🇳",
-        "welcome": "🌟 *क्रिप्टो मार्केट बॉट में स्वागत है!* 🌟\n\nमैं किसी भी सिक्के की लाइव कीमत USD/BDT में दिखाता हूँ।",
-        "prices": "💰 कीमतें",
-        "search": "🔍 खोजें",
-        "converter": "🔄 परिवर्तक",
-        "language": "🌍 भाषा",
-        "developer": "👨‍💻 डेवलपर",
-        "statistics": "📊 आँकड़े",
-        "help": "❓ सहायता",
-        "back": "◀️ पीछे",
-        "menu": "🌟 मेनू",
-        "price_fetch": "🔄 कीमतें लाई जा रही हैं...",
-        "search_prompt": "🔍 कोई भी सिक्का खोजें: `/search bitcoin`",
-        "not_found": "❌ सिक्का नहीं मिला!",
-        "error": "⚠️ त्रुटि! बाद में प्रयास करें।",
-        "calc_usage": "📝 उपयोग: `/cal 100 usd to bdt`",
-        "calc_result": "✅ *परिणाम*\n\n{amount} {from_curr} = {result:.8f} {to_curr}",
-        "dev_info": "👨‍💻 *डेवलपर*\n\n@jhgmaing\n@bot_developer_io\n\nसंस्करण 3.0",
-        "stats_text": "📊 *आँकड़े*\n\n👥 कुल उपयोगकर्ता: {users}\n🌍 भाषाएँ: 4\n⚡ स्थिति: सक्रिय\n🕐 {time}",
-        "help_text": "❓ *सहायता*\n\n/prices – टॉप 20 सिक्के\n/search <सिक्का> – खोजें\n/cal – परिवर्तक\n/lang – भाषा\n/developer – जानकारी\n/stats – आँकड़े"
-    }
+# ===================== ৮টি ভাষা (বাংলা, ইংরেজি, রুশ, হিন্দি + আরও ৪) =====================
+LANG = {
+    "bn": {"name":"বাংলা","flag":"🇧🇩","welcome":f"🌟 *ক্রিপ্টো মার্কেট বট ({BOT_USERNAME}) এ স্বাগতম!*\n\nযেকোনো কয়েনের লাইভ দাম USD/BDT তে দেখুন।","menu":"🌟 মেনু","prices":"💰 লাইভ দাম","search":"🔍 সার্চ","conv":"🔄 কনভার্টার","lang":"🌍 ভাষা","dev":"👨‍💻 ডেভেলপার","stats":"📊 পরিসংখ্যান","help":"❓ সাহায্য","back":"◀️ পেছনে","price_fetch":"🔄 দাম আনা হচ্ছে...","search_prompt":"🔍 কয়েনের নাম: `/search bitcoin`","not_found":"❌ পাওয়া যায়নি","error":"⚠️ এরর","calc_usage":"📝 `/cal 100 usd to bdt`","calc_result":"✅ {amount} {f} = {res:.8f} {t}","dev_info":"👨‍💻 @bot_developer_io\n📅 ভার্সন 4.0\n⚡ CoinGecko+KuCoin\n💾 JSONBin","stats_text":"📊 ইউজার: {u}\n🕐 {t}","help_text":"❓ /prices, /search, /cal, /lang, /developer, /stats\n📞 {b}"},
+    "en": {"name":"English","flag":"🇬🇧","welcome":f"🌟 *Welcome to Crypto Market Bot ({BOT_USERNAME})!*","menu":"🌟 Menu","prices":"💰 Live Prices","search":"🔍 Search","conv":"🔄 Converter","lang":"🌍 Language","dev":"👨‍💻 Developer","stats":"📊 Stats","help":"❓ Help","back":"◀️ Back","price_fetch":"🔄 Fetching...","search_prompt":"🔍 Enter coin: `/search bitcoin`","not_found":"❌ Not found","error":"⚠️ Error","calc_usage":"📝 `/cal 100 usd to bdt`","calc_result":"✅ {amount} {f} = {res:.8f} {t}","dev_info":"👨‍💻 @bot_developer_io\n📅 v4.0","stats_text":"📊 Users: {u}\n🕐 {t}","help_text":"❓ /prices, /search, /cal, /lang, /developer, /stats\n📞 {b}"},
+    "ru": {"name":"Русский","flag":"🇷🇺","welcome":f"🌟 *Добро пожаловать ({BOT_USERNAME})*","menu":"🌟 Меню","prices":"💰 Цены","search":"🔍 Поиск","conv":"🔄 Конвертер","lang":"🌍 Язык","dev":"👨‍💻 Разраб","stats":"📊 Стат","help":"❓ Помощь","back":"◀️ Назад","price_fetch":"🔄 Загрузка...","search_prompt":"🔍 `/search bitcoin`","not_found":"❌ Не найдено","error":"⚠️ Ошибка","calc_usage":"📝 `/cal 100 usd to bdt`","calc_result":"✅ {amount} {f} = {res:.8f} {t}","dev_info":"👨‍💻 @bot_developer_io","stats_text":"📊 Пользователей: {u}\n🕐 {t}","help_text":"❓ /prices, /search, /cal, /lang\n📞 {b}"},
+    "hi": {"name":"हिन्दी","flag":"🇮🇳","welcome":f"🌟 *क्रिप्टो मार्केट बॉट ({BOT_USERNAME}) में स्वागत*","menu":"🌟 मेनू","prices":"💰 कीमतें","search":"🔍 खोजें","conv":"🔄 परिवर्तक","lang":"🌍 भाषा","dev":"👨‍💻 डेवलपर","stats":"📊 आँकड़े","help":"❓ सहायता","back":"◀️ पीछे","price_fetch":"🔄 लोड...","search_prompt":"🔍 `/search bitcoin`","not_found":"❌ नहीं मिला","error":"⚠️ त्रुटि","calc_usage":"📝 `/cal 100 usd to bdt`","calc_result":"✅ {amount} {f} = {res:.8f} {t}","dev_info":"👨‍💻 @bot_developer_io","stats_text":"📊 उपयोगकर्ता: {u}\n🕐 {t}","help_text":"❓ /prices, /search, /cal, /lang\n📞 {b}"},
+    "es": {"name":"Español","flag":"🇪🇸","welcome":f"🌟 *Bienvenido a {BOT_USERNAME}*","menu":"🌟 Menú","prices":"💰 Precios","search":"🔍 Buscar","conv":"🔄 Convertidor","lang":"🌍 Idioma","dev":"👨‍💻 Desarrollador","stats":"📊 Estadísticas","help":"❓ Ayuda","back":"◀️ Atrás","price_fetch":"🔄 Cargando...","search_prompt":"🔍 `/search bitcoin`","not_found":"❌ No encontrado","error":"⚠️ Error","calc_usage":"📝 `/cal 100 usd to bdt`","calc_result":"✅ {amount} {f} = {res:.8f} {t}","dev_info":"👨‍💻 @bot_developer_io","stats_text":"📊 Usuarios: {u}\n🕐 {t}","help_text":"❓ /prices, /search, /cal, /lang\n📞 {b}"},
+    "fr": {"name":"Français","flag":"🇫🇷","welcome":f"🌟 *Bienvenue sur {BOT_USERNAME}*","menu":"🌟 Menu","prices":"💰 Prix","search":"🔍 Rechercher","conv":"🔄 Convertisseur","lang":"🌍 Langue","dev":"👨‍💻 Développeur","stats":"📊 Statistiques","help":"❓ Aide","back":"◀️ Retour","price_fetch":"🔄 Chargement...","search_prompt":"🔍 `/search bitcoin`","not_found":"❌ Non trouvé","error":"⚠️ Erreur","calc_usage":"📝 `/cal 100 usd to bdt`","calc_result":"✅ {amount} {f} = {res:.8f} {t}","dev_info":"👨‍💻 @bot_developer_io","stats_text":"📊 Utilisateurs: {u}\n🕐 {t}","help_text":"❓ /prices, /search, /cal, /lang\n📞 {b}"},
+    "de": {"name":"Deutsch","flag":"🇩🇪","welcome":f"🌟 *Willkommen bei {BOT_USERNAME}*","menu":"🌟 Menü","prices":"💰 Preise","search":"🔍 Suchen","conv":"🔄 Konverter","lang":"🌍 Sprache","dev":"👨‍💻 Entwickler","stats":"📊 Statistiken","help":"❓ Hilfe","back":"◀️ Zurück","price_fetch":"🔄 Lädt...","search_prompt":"🔍 `/search bitcoin`","not_found":"❌ Nicht gefunden","error":"⚠️ Fehler","calc_usage":"📝 `/cal 100 usd to bdt`","calc_result":"✅ {amount} {f} = {res:.8f} {t}","dev_info":"👨‍💻 @bot_developer_io","stats_text":"📊 Benutzer: {u}\n🕐 {t}","help_text":"❓ /prices, /search, /cal, /lang\n📞 {b}"},
+    "zh": {"name":"中文","flag":"🇨🇳","welcome":f"🌟 *欢迎使用{BOT_USERNAME}*","menu":"🌟 菜单","prices":"💰 价格","search":"🔍 搜索","conv":"🔄 转换器","lang":"🌍 语言","dev":"👨‍💻 开发者","stats":"📊 统计","help":"❓ 帮助","back":"◀️ 返回","price_fetch":"🔄 加载中...","search_prompt":"🔍 `/search bitcoin`","not_found":"❌ 未找到","error":"⚠️ 错误","calc_usage":"📝 `/cal 100 usd to bdt`","calc_result":"✅ {amount} {f} = {res:.8f} {t}","dev_info":"👨‍💻 @bot_developer_io","stats_text":"📊 用户: {u}\n🕐 {t}","help_text":"❓ /prices, /search, /cal, /lang\n📞 {b}"}
 }
+SUPPORTED_LANGS = list(LANG.keys())
 
-# ===================== ডাটাবেস ফাংশন =====================
-def get_user_lang(user_id):
+# ===================== ডাটাবেস ফাংশন (বিস্তারিত) =====================
+def get_db():
     try:
         headers = {"X-Master-Key": JSONBIN_MASTER_KEY}
-        resp = requests.get(JSONBIN_READ, headers=headers, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json().get("record", {})
-            return data.get("users", {}).get(str(user_id), {}).get("lang", "bn")
-    except:
-        pass
-    return "bn"
+        r = requests.get(JSONBIN_READ, headers=headers, timeout=5)
+        if r.status_code == 200:
+            return r.json().get("record", {"users": {}, "total_commands": 0})
+    except: pass
+    return {"users": {}, "total_commands": 0}
+
+def save_db(data):
+    try:
+        headers = {"X-Master-Key": JSONBIN_MASTER_KEY, "Content-Type": "application/json"}
+        requests.put(JSONBIN_WRITE, json=data, headers=headers, timeout=5)
+    except: pass
+
+def get_user_lang(user_id):
+    db = get_db()
+    return db.get("users", {}).get(str(user_id), {}).get("lang", "bn")
 
 def set_user_lang(user_id, lang):
-    try:
-        headers = {"X-Master-Key": JSONBIN_MASTER_KEY}
-        resp = requests.get(JSONBIN_READ, headers=headers, timeout=5)
-        if resp.status_code != 200:
-            return
-        data = resp.json().get("record", {})
-        if "users" not in data:
-            data["users"] = {}
-        if str(user_id) not in data["users"]:
-            data["users"][str(user_id)] = {}
-        data["users"][str(user_id)]["lang"] = lang
-        headers_write = {**headers, "Content-Type": "application/json"}
-        requests.put(JSONBIN_WRITE, json=data, headers=headers_write, timeout=5)
-    except:
-        pass
+    db = get_db()
+    if "users" not in db: db["users"] = {}
+    if str(user_id) not in db["users"]: db["users"][str(user_id)] = {}
+    db["users"][str(user_id)]["lang"] = lang
+    save_db(db)
 
-def update_user_stats(user_id):
-    """শুধু ইউজার কাউন্ট বাড়ানোর জন্য (ঐচ্ছিক)"""
-    try:
-        headers = {"X-Master-Key": JSONBIN_MASTER_KEY}
-        resp = requests.get(JSONBIN_READ, headers=headers, timeout=5)
-        if resp.status_code != 200:
-            return
-        data = resp.json().get("record", {})
-        if "users" not in data:
-            data["users"] = {}
-        if str(user_id) not in data["users"]:
-            data["users"][str(user_id)] = {"joined": str(datetime.now())}
-            headers_write = {**headers, "Content-Type": "application/json"}
-            requests.put(JSONBIN_WRITE, json=data, headers=headers_write, timeout=5)
-    except:
-        pass
+def update_stats(user_id, command):
+    db = get_db()
+    if "users" not in db: db["users"] = {}
+    if str(user_id) not in db["users"]:
+        db["users"][str(user_id)] = {"joined": str(datetime.now()), "commands": 0}
+    db["users"][str(user_id)]["commands"] = db["users"][str(user_id)].get("commands", 0) + 1
+    db["total_commands"] = db.get("total_commands", 0) + 1
+    save_db(db)
 
-# ===================== ক্রিপ্টো API (একাধিক ব্যাকআপ) =====================
-# ক্যাশ সিস্টেম
+# ===================== ক্রিপ্টো API (৩টি ব্যাকআপ + ক্যাশ) =====================
 price_cache = {"data": None, "time": 0, "source": None}
 
-def fetch_coingecko_top():
-    """CoinGecko থেকে টপ কয়েন আনার চেষ্টা"""
+def fetch_coingecko():
     try:
-        url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=20&page=1&sparkline=false"
-        r = requests.get(url, timeout=10)
+        url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=25&page=1&sparkline=false"
+        r = requests.get(url, timeout=8)
         if r.status_code == 200:
             coins = r.json()
             result = []
@@ -180,84 +90,102 @@ def fetch_coingecko_top():
                     "change": c.get("price_change_percentage_24h", 0)
                 })
             return result, "CoinGecko"
-    except:
-        pass
+    except: pass
     return None, None
 
-def fetch_alternative_api():
-    """ব্যাকআপ: Kucoin বা অন্য (এখানে সিমুলেটেড)"""
+def fetch_kucoin():
     try:
-        # Kucoin থেকে কিছু সাধারণ কয়েন
         url = "https://api.kucoin.com/api/v1/market/allTickers"
-        r = requests.get(url, timeout=8)
+        r = requests.get(url, timeout=6)
         if r.status_code == 200:
-            data = r.json()
-            tickers = data.get("data", {}).get("ticker", [])
+            data = r.json().get("data", {}).get("ticker", [])
             result = []
-            for t in tickers[:20]:
-                symbol = t.get("symbol", "")
-                if symbol.endswith("-USDT"):
-                    coin = symbol.replace("-USDT", "")
+            for t in data[:25]:
+                if t.get("symbol", "").endswith("-USDT"):
                     price = float(t.get("last", 0))
                     if price > 0:
+                        sym = t["symbol"].replace("-USDT", "")
                         result.append({
-                            "name": coin,
-                            "symbol": coin,
+                            "name": sym,
+                            "symbol": sym,
                             "usd": price,
                             "bdt": price * 118,
                             "change": float(t.get("changeRate", 0)) * 100
                         })
             if result:
                 return result, "KuCoin"
-    except:
-        pass
+    except: pass
+    return None, None
+
+def fetch_binance():
+    try:
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        r = requests.get(url, timeout=6)
+        if r.status_code == 200:
+            data = r.json()
+            result = []
+            for t in data:
+                if t.get("symbol", "").endswith("USDT"):
+                    price = float(t.get("lastPrice", 0))
+                    if price > 0:
+                        sym = t["symbol"].replace("USDT", "")
+                        result.append({
+                            "name": sym,
+                            "symbol": sym,
+                            "usd": price,
+                            "bdt": price * 118,
+                            "change": float(t.get("priceChangePercent", 0))
+                        })
+            if result:
+                return result[:25], "Binance"
+    except: pass
     return None, None
 
 def get_top_coins():
-    """প্রথমে CoinGecko, তারপর ব্যাকআপ, তারপর ফিক্সড ডাটা"""
     global price_cache
     now = time.time()
-    if price_cache["data"] and now - price_cache["time"] < 45:  # 45 সেকেন্ড ক্যাশ
+    if price_cache["data"] and now - price_cache["time"] < 60:
         return price_cache["data"]
-    
-    data, source = fetch_coingecko_top()
-    if data:
-        price_cache = {"data": data, "time": now, "source": source}
-        return data
-    
-    data, source = fetch_alternative_api()
-    if data:
-        price_cache = {"data": data, "time": now, "source": source}
-        return data
-    
-    # ফাইনাল ব্যাকআপ: স্ট্যাটিক ডাটা (কখনো ফেল করবে না)
+    for fetcher in [fetch_coingecko, fetch_kucoin, fetch_binance]:
+        data, source = fetcher()
+        if data:
+            price_cache = {"data": data, "time": now, "source": source}
+            return data
+    # ফাইনাল ব্যাকআপ
     fallback = [
-        {"name": "Bitcoin", "symbol": "BTC", "usd": 70000, "bdt": 8260000, "change": 2.5},
-        {"name": "Ethereum", "symbol": "ETH", "usd": 3500, "bdt": 413000, "change": 1.8},
-        {"name": "BNB", "symbol": "BNB", "usd": 600, "bdt": 70800, "change": -0.5},
-        {"name": "Solana", "symbol": "SOL", "usd": 150, "bdt": 17700, "change": 5.2},
-        {"name": "XRP", "symbol": "XRP", "usd": 0.6, "bdt": 70.8, "change": -1.2},
-        {"name": "Dogecoin", "symbol": "DOGE", "usd": 0.15, "bdt": 17.7, "change": 3.0},
-        {"name": "Cardano", "symbol": "ADA", "usd": 0.45, "bdt": 53.1, "change": -0.8},
-        {"name": "Polygon", "symbol": "MATIC", "usd": 0.8, "bdt": 94.4, "change": 1.5}
+        {"name":"Bitcoin","symbol":"BTC","usd":70000,"bdt":8260000,"change":2.5},
+        {"name":"Ethereum","symbol":"ETH","usd":3500,"bdt":413000,"change":1.8},
+        {"name":"BNB","symbol":"BNB","usd":600,"bdt":70800,"change":-0.5},
+        {"name":"Solana","symbol":"SOL","usd":150,"bdt":17700,"change":5.2},
+        {"name":"XRP","symbol":"XRP","usd":0.6,"bdt":70.8,"change":-1.2},
+        {"name":"Dogecoin","symbol":"DOGE","usd":0.15,"bdt":17.7,"change":3.0},
+        {"name":"Cardano","symbol":"ADA","usd":0.45,"bdt":53.1,"change":-0.8},
+        {"name":"Polygon","symbol":"MATIC","usd":0.8,"bdt":94.4,"change":1.5}
     ]
     price_cache = {"data": fallback, "time": now, "source": "Fallback"}
     return fallback
 
-def search_any_coin(query):
-    """যেকোনো কয়েন সার্চ – একাধিক API ট্রাই করবে"""
-    # প্রথম চেষ্টা: CoinGecko search + price
+def search_coin_multi(query):
+    """একাধিক API ব্যবহার করে সার্চ – প্রথমে CoinGecko exact, তারপর Kucoin/Binance"""
+    # 1. CoinGecko search + price
     try:
-        # search
         s_url = f"https://api.coingecko.com/api/v3/search?query={query}"
         s_resp = requests.get(s_url, timeout=8)
         if s_resp.status_code == 200:
             s_data = s_resp.json()
-            if s_data.get("coins") and len(s_data["coins"]) > 0:
-                coin_id = s_data["coins"][0]["id"]
-                name = s_data["coins"][0]["name"]
-                symbol = s_data["coins"][0]["symbol"].upper()
-                # price
+            coins = s_data.get("coins", [])
+            if coins:
+                best = None
+                ql = query.lower()
+                for c in coins:
+                    if c["symbol"].lower() == ql or c["name"].lower() == ql:
+                        best = c
+                        break
+                if not best:
+                    best = coins[0]
+                coin_id = best["id"]
+                name = best["name"]
+                symbol = best["symbol"].upper()
                 p_url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd,bdt"
                 p_resp = requests.get(p_url, timeout=8)
                 if p_resp.status_code == 200:
@@ -266,229 +194,237 @@ def search_any_coin(query):
                         usd = p_data[coin_id].get("usd", 0)
                         bdt = p_data[coin_id].get("bdt", usd*118)
                         return {"name": name, "symbol": symbol, "usd": usd, "bdt": bdt, "id": coin_id}
-    except:
-        pass
-    
-    # দ্বিতীয় চেষ্টা: Kucoin API থেকে অনুসন্ধান
+    except: pass
+    # 2. KuCoin থেকে খোঁজ
     try:
-        k_url = f"https://api.kucoin.com/api/v1/market/allTickers"
-        k_resp = requests.get(k_url, timeout=8)
-        if k_resp.status_code == 200:
-            tickers = k_resp.json().get("data", {}).get("ticker", [])
+        url = "https://api.kucoin.com/api/v1/market/allTickers"
+        r = requests.get(url, timeout=6)
+        if r.status_code == 200:
+            tickers = r.json().get("data", {}).get("ticker", [])
             for t in tickers:
-                if query.upper() in t.get("symbol", "") and t.get("symbol", "").endswith("-USDT"):
-                    symbol = t["symbol"].replace("-USDT", "")
+                if query.upper() in t.get("symbol", "") and t["symbol"].endswith("-USDT"):
                     price = float(t.get("last", 0))
-                    return {"name": symbol, "symbol": symbol, "usd": price, "bdt": price*118, "id": symbol.lower()}
-    except:
-        pass
-    
-    return None  # না পাওয়া গেলে
+                    sym = t["symbol"].replace("-USDT", "")
+                    return {"name": sym, "symbol": sym, "usd": price, "bdt": price*118, "id": sym.lower()}
+    except: pass
+    # 3. Binance
+    try:
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        r = requests.get(url, timeout=6)
+        if r.status_code == 200:
+            data = r.json()
+            for t in data:
+                if t.get("symbol", "").endswith("USDT") and query.upper() in t["symbol"]:
+                    price = float(t.get("lastPrice", 0))
+                    sym = t["symbol"].replace("USDT", "")
+                    return {"name": sym, "symbol": sym, "usd": price, "bdt": price*118, "id": sym.lower()}
+    except: pass
+    return None
 
-def get_live_rate(from_curr, to_curr):
-    """কনভার্টারের জন্য রেট – USD, BDT, এবং যেকোনো ক্রিপ্টো"""
-    rates = {"usd": 1, "bdt": 118, "usdt": 1}
-    # যদি ক্রিপ্টো থাকে তাহলে টপ কয়েন থেকে রেট নেওয়া
-    crypto_list = ["btc", "eth", "bnb", "sol", "xrp", "doge", "ada", "matic", "dot", "ltc"]
-    if from_curr in crypto_list or to_curr in crypto_list:
-        top = get_top_coins()
-        for coin in top:
-            sym = coin["symbol"].lower()
-            if sym == from_curr:
-                rates[from_curr] = coin["usd"]
-            if sym == to_curr:
-                rates[to_curr] = coin["usd"]
-    # ডিফল্ট মান
-    if from_curr not in rates:
-        rates[from_curr] = 1
-    if to_curr not in rates:
-        rates[to_curr] = 1
-    return rates[from_curr], rates[to_curr]
+def get_crypto_rate(currency):
+    curr = currency.lower()
+    if curr in ["usd", "usdt"]: return 1
+    if curr == "bdt": return 118
+    top = get_top_coins()
+    for c in top:
+        if c["symbol"].lower() == curr:
+            return c["usd"]
+    static = {"btc":70000, "eth":3500, "bnb":600, "sol":150, "xrp":0.6, "doge":0.15, "wbtc":70000, "ada":0.45, "matic":0.8, "dot":7, "ltc":80}
+    return static.get(curr, 1)
 
 # ===================== বক্স সিস্টেম (ইনলাইন কিবোর্ড) =====================
 def get_main_keyboard(lang_code):
-    t = LANGUAGES[lang_code]
+    t = LANG[lang_code]
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{t['prices']}", callback_data="menu_prices"),
-         InlineKeyboardButton(f"{t['search']}", callback_data="menu_search")],
-        [InlineKeyboardButton(f"{t['converter']}", callback_data="menu_converter"),
-         InlineKeyboardButton(f"{t['language']}", callback_data="menu_language")],
-        [InlineKeyboardButton(f"{t['developer']}", callback_data="menu_developer"),
-         InlineKeyboardButton(f"{t['statistics']}", callback_data="menu_statistics")],
-        [InlineKeyboardButton(f"{t['help']}", callback_data="menu_help")]
+        [InlineKeyboardButton(t["prices"], callback_data="menu_prices"),
+         InlineKeyboardButton(t["search"], callback_data="menu_search")],
+        [InlineKeyboardButton(t["conv"], callback_data="menu_conv"),
+         InlineKeyboardButton(t["lang"], callback_data="menu_lang")],
+        [InlineKeyboardButton(t["dev"], callback_data="menu_dev"),
+         InlineKeyboardButton(t["stats"], callback_data="menu_stats")],
+        [InlineKeyboardButton(t["help"], callback_data="menu_help")]
     ])
 
-# ===================== টেলিগ্রাম হ্যান্ডলার =====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ===================== টেলিগ্রাম হ্যান্ডলার (সব কমান্ড) =====================
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    update_user_stats(uid)
+    update_stats(uid, "/start")
     lang = get_user_lang(uid)
-    text = LANGUAGES[lang]["welcome"]
-    await update.message.reply_text(text, reply_markup=get_main_keyboard(lang), parse_mode="Markdown")
+    await update.message.reply_text(LANG[lang]["welcome"], reply_markup=get_main_keyboard(lang), parse_mode="Markdown")
 
-async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
+async def menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
     lang = get_user_lang(uid)
-    action = query.data.split("_")[1]
-    
+    action = q.data.split("_")[1]
+
     if action == "prices":
-        await query.edit_message_text(LANGUAGES[lang]["price_fetch"])
+        await q.edit_message_text(LANG[lang]["price_fetch"])
         coins = get_top_coins()
-        msg = f"💰 *{LANGUAGES[lang]['prices']}*\n\n"
-        for c in coins[:15]:
+        msg = f"💰 *{LANG[lang]['prices']}*\n\n"
+        for c in coins[:20]:
             emoji = "📈" if c["change"] >= 0 else "📉"
             msg += f"{emoji} *{c['name']}* ({c['symbol']})\n   💵 ${c['usd']:,.2f} | ৳{c['bdt']:,.2f}   {c['change']:+.2f}%\n\n"
         msg += f"\n🔍 /search <coin>"
-        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton(LANGUAGES[lang]['back'], callback_data="menu_back")]])
-        await query.edit_message_text(msg, reply_markup=back_btn, parse_mode="Markdown")
-    
-    elif action == "search":
-        msg = LANGUAGES[lang]["search_prompt"]
-        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton(LANGUAGES[lang]['back'], callback_data="menu_back")]])
-        await query.edit_message_text(msg, reply_markup=back_btn, parse_mode="Markdown")
-    
-    elif action == "converter":
-        msg = LANGUAGES[lang]["calc_usage"]
-        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton(LANGUAGES[lang]['back'], callback_data="menu_back")]])
-        await query.edit_message_text(msg, reply_markup=back_btn, parse_mode="Markdown")
-    
-    elif action == "language":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🇧🇩 বাংলা", callback_data="lang_bn"),
-             InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
-            [InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru"),
-             InlineKeyboardButton("🇮🇳 हिन्दी", callback_data="lang_hi")],
-            [InlineKeyboardButton(LANGUAGES[lang]['back'], callback_data="menu_back")]
-        ])
-        await query.edit_message_text("🌍 *Select your language / ভাষা নির্বাচন করুন*", reply_markup=kb, parse_mode="Markdown")
-    
-    elif action == "developer":
-        msg = LANGUAGES[lang]["dev_info"]
-        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton(LANGUAGES[lang]['back'], callback_data="menu_back")]])
-        await query.edit_message_text(msg, reply_markup=back_btn, parse_mode="Markdown")
-    
-    elif action == "statistics":
-        total_users = 0
-        try:
-            headers = {"X-Master-Key": JSONBIN_MASTER_KEY}
-            r = requests.get(JSONBIN_READ, headers=headers, timeout=5)
-            if r.status_code == 200:
-                total_users = len(r.json().get("record", {}).get("users", {}))
-        except:
-            pass
-        msg = LANGUAGES[lang]["stats_text"].format(users=total_users, time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton(LANGUAGES[lang]['back'], callback_data="menu_back")]])
-        await query.edit_message_text(msg, reply_markup=back_btn, parse_mode="Markdown")
-    
-    elif action == "help":
-        msg = LANGUAGES[lang]["help_text"]
-        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton(LANGUAGES[lang]['back'], callback_data="menu_back")]])
-        await query.edit_message_text(msg, reply_markup=back_btn, parse_mode="Markdown")
-    
-    elif action == "back":
-        await query.edit_message_text(LANGUAGES[lang]["welcome"], reply_markup=get_main_keyboard(lang), parse_mode="Markdown")
+        back = InlineKeyboardMarkup([[InlineKeyboardButton(LANG[lang]["back"], callback_data="menu_back")]])
+        await q.edit_message_text(msg, reply_markup=back, parse_mode="Markdown")
 
-async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    new_lang = query.data.split("_")[1]
+    elif action == "search":
+        msg = LANG[lang]["search_prompt"]
+        back = InlineKeyboardMarkup([[InlineKeyboardButton(LANG[lang]["back"], callback_data="menu_back")]])
+        await q.edit_message_text(msg, reply_markup=back, parse_mode="Markdown")
+
+    elif action == "conv":
+        msg = LANG[lang]["calc_usage"]
+        back = InlineKeyboardMarkup([[InlineKeyboardButton(LANG[lang]["back"], callback_data="menu_back")]])
+        await q.edit_message_text(msg, reply_markup=back, parse_mode="Markdown")
+
+    elif action == "lang":
+        kb = []
+        row = []
+        for i, lc in enumerate(SUPPORTED_LANGS):
+            row.append(InlineKeyboardButton(f"{LANG[lc]['flag']} {LANG[lc]['name']}", callback_data=f"lang_{lc}"))
+            if (i+1) % 2 == 0 or i == len(SUPPORTED_LANGS)-1:
+                kb.append(row)
+                row = []
+        kb.append([InlineKeyboardButton(LANG[lang]["back"], callback_data="menu_back")])
+        await q.edit_message_text("🌍 ভাষা নির্বাচন করুন:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+    elif action == "dev":
+        msg = LANG[lang]["dev_info"]
+        back = InlineKeyboardMarkup([[InlineKeyboardButton(LANG[lang]["back"], callback_data="menu_back")]])
+        await q.edit_message_text(msg, reply_markup=back, parse_mode="Markdown")
+
+    elif action == "stats":
+        db = get_db()
+        total_users = len(db.get("users", {}))
+        total_cmds = db.get("total_commands", 0)
+        msg = LANG[lang]["stats_text"].format(u=total_users, t=datetime.now().strftime("%Y-%m-%d %H:%M:%S")) + f"\n📊 মোট কমান্ড: {total_cmds}"
+        back = InlineKeyboardMarkup([[InlineKeyboardButton(LANG[lang]["back"], callback_data="menu_back")]])
+        await q.edit_message_text(msg, reply_markup=back, parse_mode="Markdown")
+
+    elif action == "help":
+        msg = LANG[lang]["help_text"].format(b=BOT_USERNAME)
+        back = InlineKeyboardMarkup([[InlineKeyboardButton(LANG[lang]["back"], callback_data="menu_back")]])
+        await q.edit_message_text(msg, reply_markup=back, parse_mode="Markdown")
+
+    elif action == "back":
+        await q.edit_message_text(LANG[lang]["welcome"], reply_markup=get_main_keyboard(lang), parse_mode="Markdown")
+
+async def language_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    new_lang = q.data.split("_")[1]
     set_user_lang(uid, new_lang)
-    # নতুন ভাষায় মেনু দেখানো
-    text = LANGUAGES[new_lang]["welcome"]
-    await query.edit_message_text(text, reply_markup=get_main_keyboard(new_lang), parse_mode="Markdown")
+    await q.edit_message_text(LANG[new_lang]["welcome"], reply_markup=get_main_keyboard(new_lang), parse_mode="Markdown")
 
 # কমান্ড হ্যান্ডলার
-async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def prices_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    update_stats(uid, "/prices")
     lang = get_user_lang(uid)
-    await update.message.reply_text(LANGUAGES[lang]["price_fetch"])
+    await update.message.reply_text(LANG[lang]["price_fetch"])
     coins = get_top_coins()
-    msg = f"💰 *{LANGUAGES[lang]['prices']}*\n\n"
-    for c in coins[:15]:
+    msg = f"💰 *{LANG[lang]['prices']}*\n\n"
+    for c in coins[:20]:
         emoji = "📈" if c["change"] >= 0 else "📉"
         msg += f"{emoji} *{c['name']}* ({c['symbol']})\n   💵 ${c['usd']:,.2f} | ৳{c['bdt']:,.2f}   {c['change']:+.2f}%\n\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def search_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    update_stats(uid, "/search")
     lang = get_user_lang(uid)
-    if not context.args:
-        await update.message.reply_text(LANGUAGES[lang]["search_prompt"], parse_mode="Markdown")
+    if not ctx.args:
+        await update.message.reply_text(LANG[lang]["search_prompt"], parse_mode="Markdown")
         return
-    query = " ".join(context.args)
+    query = " ".join(ctx.args)
     await update.message.reply_text(f"🔄 Searching *{query}*...", parse_mode="Markdown")
-    coin = search_any_coin(query)
+    coin = search_coin_multi(query)
     if not coin or coin["usd"] == 0:
-        await update.message.reply_text(LANGUAGES[lang]["not_found"], parse_mode="Markdown")
+        await update.message.reply_text(LANG[lang]["not_found"], parse_mode="Markdown")
         return
     msg = f"✅ *{coin['name']}* ({coin['symbol']})\n\n💰 *Current Price*\n💵 ${coin['usd']:,.4f} USD\n🇧🇩 ৳{coin['bdt']:,.2f} BDT\n\n💡 /cal 1 {coin['symbol'].lower()} to usd"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def calc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def calc_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    update_stats(uid, "/cal")
     lang = get_user_lang(uid)
-    if not context.args:
-        await update.message.reply_text(LANGUAGES[lang]["calc_usage"], parse_mode="Markdown")
+    if not ctx.args:
+        await update.message.reply_text(LANG[lang]["calc_usage"], parse_mode="Markdown")
         return
     try:
-        txt = " ".join(context.args).lower()
+        txt = " ".join(ctx.args).lower()
         m = re.match(r"(\d+(?:\.\d+)?)\s+(\w+)\s+to\s+(\w+)", txt)
         if not m:
-            await update.message.reply_text(LANGUAGES[lang]["calc_usage"], parse_mode="Markdown")
+            await update.message.reply_text(LANG[lang]["calc_usage"], parse_mode="Markdown")
             return
         amount = float(m.group(1))
-        from_curr = m.group(2)
-        to_curr = m.group(3)
-        rate_from, rate_to = get_live_rate(from_curr, to_curr)
-        usd_value = amount * rate_from
-        result = usd_value / rate_to
-        msg = LANGUAGES[lang]["calc_result"].format(amount=amount, from_curr=from_curr.upper(), result=result, to_curr=to_curr.upper())
+        frm = m.group(2)
+        to = m.group(3)
+        rate_f = get_crypto_rate(frm)
+        rate_t = get_crypto_rate(to)
+        usd_val = amount * rate_f
+        result = usd_val / rate_t
+        msg = LANG[lang]["calc_result"].format(amount=amount, f=frm.upper(), res=result, t=to.upper())
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Calc error: {e}")
-        await update.message.reply_text(LANGUAGES[lang]["error"], parse_mode="Markdown")
+        await update.message.reply_text(LANG[lang]["error"], parse_mode="Markdown")
 
-async def dev_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def dev_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    update_stats(uid, "/developer")
     lang = get_user_lang(uid)
-    await update.message.reply_text(LANGUAGES[lang]["dev_info"], parse_mode="Markdown")
+    await update.message.reply_text(LANG[lang]["dev_info"], parse_mode="Markdown")
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stats_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    update_stats(uid, "/stats")
     lang = get_user_lang(uid)
-    total_users = 0
-    try:
-        headers = {"X-Master-Key": JSONBIN_MASTER_KEY}
-        r = requests.get(JSONBIN_READ, headers=headers, timeout=5)
-        if r.status_code == 200:
-            total_users = len(r.json().get("record", {}).get("users", {}))
-    except:
-        pass
-    msg = LANGUAGES[lang]["stats_text"].format(users=total_users, time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    db = get_db()
+    total_users = len(db.get("users", {}))
+    total_cmds = db.get("total_commands", 0)
+    msg = LANG[lang]["stats_text"].format(u=total_users, t=datetime.now().strftime("%Y-%m-%d %H:%M:%S")) + f"\n📊 মোট কমান্ড: {total_cmds}"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    update_stats(uid, "/help")
     lang = get_user_lang(uid)
-    await update.message.reply_text(LANGUAGES[lang]["help_text"], parse_mode="Markdown")
+    await update.message.reply_text(LANG[lang]["help_text"].format(b=BOT_USERNAME), parse_mode="Markdown")
 
-async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def lang_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    lang = get_user_lang(uid)  # বর্তমান ভাষা (বাটনের জন্য)
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🇧🇩 বাংলা", callback_data="lang_bn"),
-         InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
-        [InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru"),
-         InlineKeyboardButton("🇮🇳 हिन्दी", callback_data="lang_hi")]
-    ])
-    await update.message.reply_text("🌍 *ভাষা নির্বাচন করুন / Select language*", reply_markup=kb, parse_mode="Markdown")
+    update_stats(uid, "/lang")
+    lang = get_user_lang(uid)
+    kb = []
+    row = []
+    for i, lc in enumerate(SUPPORTED_LANGS):
+        row.append(InlineKeyboardButton(f"{LANG[lc]['flag']} {LANG[lc]['name']}", callback_data=f"lang_{lc}"))
+        if (i+1) % 2 == 0 or i == len(SUPPORTED_LANGS)-1:
+            kb.append(row)
+            row = []
+    await update.message.reply_text("🌍 ভাষা নির্বাচন করুন:", reply_markup=InlineKeyboardMarkup(kb))
 
-# ===================== মেইন ফাংশন =====================
+# অতিরিক্ত মজার কমান্ড (বিকল্প)
+async def about_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"🤖 *{BOT_USERNAME}*\n\nবিশ্বের যেকোনো ক্রিপ্টো কয়েনের লাইভ দাম ও কনভার্টার।\nডেভেলপার: @bot_developer_io", parse_mode="Markdown")
+
+async def donate_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🙏 *দান করতে চাইলে*\nBTC: bc1q...\nETH: 0x...\nআপনার সাহায্য বটকে বাঁচিয়ে রাখবে।", parse_mode="Markdown")
+
+async def ping_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    start = time.time()
+    await update.message.reply_text("🏓 পং!")
+    end = time.time()
+    await update.message.reply_text(f"⏱️ লেটেন্সি: {(end-start)*1000:.2f} ms")
+
+# ===================== মেইন =====================
 def main():
-    # Render ফ্রি টায়ারের জন্য ইভেন্ট লুপ ফিক্স
     try:
         loop = asyncio.get_event_loop()
         if loop.is_closed():
@@ -497,10 +433,8 @@ def main():
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    
+
     app = Application.builder().token(TOKEN).build()
-    
-    # কমান্ড রেজিস্টার
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("prices", prices_command))
@@ -509,23 +443,15 @@ def main():
     app.add_handler(CommandHandler("developer", dev_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("lang", lang_command))
-    
-    # কলব্যাক
+    app.add_handler(CommandHandler("about", about_command))
+    app.add_handler(CommandHandler("donate", donate_command))
+    app.add_handler(CommandHandler("ping", ping_command))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
     app.add_handler(CallbackQueryHandler(language_callback, pattern="lang_"))
-    
-    print("="*50)
-    print("🤖 CRYPTO MARKET BOT v3.0 - MEGA PRO")
-    print("="*50)
-    print("✅ 4 Languages: বাংলা, English, Русский, हिन्दी")
-    print("✅ Any Coin Support + Multiple API Fallback")
-    print("✅ Box System + Inline Buttons")
-    print("✅ Group & Channel Ready")
-    print("✅ JSONBin Database Active")
-    print("="*50)
-    print("🚀 Bot is RUNNING on Render Free Tier")
-    print("="*50)
-    
+
+    print("✅ বট চালু হয়েছে – বিশাল মারাত্মক ভার্সন 4.0")
+    print(f"📊 {len(SUPPORTED_LANGS)}টি ভাষা সাপোর্টেড")
+    print("🚀 Render ফ্রি টায়ারে অপটিমাইজড")
     app.run_polling()
 
 if __name__ == "__main__":
