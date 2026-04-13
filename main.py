@@ -1,3 +1,5 @@
+import asyncio
+import nest_asyncio
 import requests
 import json
 import logging
@@ -5,6 +7,12 @@ import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from datetime import datetime
+
+# Python 3.14 ফিক্স - এটা Render এ কাজ করাবে
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    nest_asyncio.apply()
 
 # ============= কনফিগারেশন =============
 TOKEN = "8592158247:AAG_Bd1ZxdsPqgn5GuVRkCNP7jzJEVFXF-Q"
@@ -27,7 +35,7 @@ LANGUAGES = {
     "hi": {"name": "हिन्दी", "flag": "🇮🇳", "prices": "💰 लाइव कीमतें", "search": "🔍 कॉइन खोजें", "not_found": "❌ कॉइन नहीं मिला!", "error": "⚠️ त्रुटि!", "help": "🤖 सहायता", "dev": "👨‍💻 डेवलपर", "stats": "📊 आँकड़े", "conv": "🔄 कनवर्टर"}
 }
 
-# ============= ডাটাবেস =============
+# ============= ডাটাবেস ফাংশন =============
 def get_user_data():
     try:
         headers = {"X-Master-Key": JSONBIN_MASTER_KEY}
@@ -58,12 +66,8 @@ def set_user_lang(user_id, lang):
 
 # ============= যেকোনো কয়েনের প্রাইস ফাংশন =============
 def get_any_coin_price(coin_name):
-    """যেকোনো কয়েনের প্রাইস আনার ফাংশন - কোন error আসবে না"""
     try:
-        # কয়েনের নাম ক্লিন করা
         coin_clean = coin_name.lower().strip().replace(" ", "-").replace("_", "-")
-        
-        # CoinGecko search API
         search_url = f"https://api.coingecko.com/api/v3/search?query={coin_clean}"
         search_response = requests.get(search_url, timeout=10)
         
@@ -75,12 +79,10 @@ def get_any_coin_price(coin_name):
         if not search_data.get("coins") or len(search_data["coins"]) == 0:
             return None, "NOT_FOUND"
         
-        # প্রথম রেজাল্টের ID নেওয়া
         coin_id = search_data["coins"][0]["id"]
         coin_symbol = search_data["coins"][0]["symbol"].upper()
         coin_full_name = search_data["coins"][0]["name"]
         
-        # প্রাইস ফেচ করা
         price_url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd,bdt"
         price_response = requests.get(price_url, timeout=10)
         
@@ -108,7 +110,6 @@ def get_any_coin_price(coin_name):
         return None, "EXCEPTION"
 
 def get_top_coins():
-    """টপ কয়েনের লিস্ট"""
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=20&page=1&sparkline=false"
         response = requests.get(url, timeout=10)
@@ -133,7 +134,6 @@ def get_top_coins():
         return get_fallback_coins()
 
 def get_fallback_coins():
-    """API কাজ না করলে ব্যাকআপ ডাটা"""
     return [
         {"name": "Bitcoin", "symbol": "BTC", "usd": 65000, "bdt": 7670000, "change": 2.5},
         {"name": "Ethereum", "symbol": "ETH", "usd": 3500, "bdt": 413000, "change": 1.8},
@@ -147,7 +147,6 @@ def get_fallback_coins():
 
 # ============= টেলিগ্রাম হ্যান্ডলার =============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """স্টার্ট কমান্ড - বক্স সিস্টেম"""
     keyboard = [
         [InlineKeyboardButton("💰 Prices", callback_data="menu_prices"),
          InlineKeyboardButton("🔍 Search Coin", callback_data="menu_search")],
@@ -171,7 +170,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """বাটন ক্লিক হ্যান্ডলার"""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -322,7 +320,6 @@ async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def search_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """যেকোনো কয়েন সার্চ করার কমান্ড - কোন error আসবে না"""
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     
@@ -331,8 +328,7 @@ async def search_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔍 *{LANGUAGES[lang]['search']}*\n\n"
             "📝 *Usage:* `/search <coin_name>`\n"
             "✅ *Example:* `/search bitcoin`\n"
-            "✅ *Example:* `/search dogecoin`\n"
-            "✅ *Example:* `/search shiba inu`\n\n"
+            "✅ *Example:* `/search dogecoin`\n\n"
             "💡 *Try any coin name!*",
             parse_mode="Markdown"
         )
@@ -356,7 +352,6 @@ async def search_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # সফল হলে রেজাল্ট দেখান
     change_emoji = "📈" if result.get("usd", 0) > 0 else "💰"
     
     text = f"""✅ *{result['name']}* ({result['symbol']})
@@ -379,7 +374,6 @@ async def search_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """টপ কয়েন দেখানোর কমান্ড"""
     await update.message.reply_text("🔄 Fetching top cryptocurrencies...")
     coins = get_top_coins()
     
@@ -394,7 +388,6 @@ async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """কারেন্সি কনভার্টার"""
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     
@@ -424,10 +417,8 @@ async def calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from_curr = match.group(2)
         to_curr = match.group(3)
         
-        # লাইভ রেট ফেচ করার চেষ্টা
         rates = {"usd": 1, "bdt": 118, "usdt": 1}
         
-        # ক্রিপ্টো রেট আপডেট করার চেষ্টা
         crypto_list = ["btc", "eth", "bnb", "sol", "xrp", "doge", "ada"]
         if from_curr in crypto_list or to_curr in crypto_list:
             top_coins = get_top_coins()
@@ -438,7 +429,6 @@ async def calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if symbol == to_curr:
                     rates[to_curr] = coin["usd"]
         
-        # ডিফল্ট ভ্যালু সেট
         if from_curr not in rates:
             rates[from_curr] = 1
         if to_curr not in rates:
@@ -544,7 +534,6 @@ async def change_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🌍 *Select your language:*", reply_markup=reply_markup, parse_mode="Markdown")
 
 async def refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """রিফ্রেশ বাটন হ্যান্ডলার"""
     query = update.callback_query
     await query.answer()
     coin_id = query.data.split("_")[1]
@@ -572,8 +561,18 @@ async def refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-# ============= মেইন =============
+# ============= মেইন ফাংশন =============
 def main():
+    # ইভেন্ট লুপ ফিক্স - Render এর জন্য
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
     app = Application.builder().token(TOKEN).build()
     
     # কমান্ড হ্যান্ডলার
