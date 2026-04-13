@@ -4,11 +4,14 @@
 import logging
 import json
 import re
+import concurrent.futures
+import threading
 from datetime import datetime
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Any
 
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from flask import Flask
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -28,19 +31,27 @@ JSONBIN_ACCESS_KEY = "$2a$10$7Nb5QAYjDezYlvPsRMGxnerfh.nthYJtLF3ac54jCIucQUsS3y3
 JSONBIN_BIN_ID = "69dc964236566621a8a94516"
 JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
 
-# API এন্ডপয়েন্ট
-COINGECKO_API = "https://api.coingecko.com/api/v3"
-FRANKFURTER_API = "https://api.frankfurter.app"
-
-# ল্যাঙ্গুয়েজ ডিকশনারি
-LANGUAGES = {
-    "bn": "🇧🇩 বাংলা",
-    "en": "🇬🇧 English",
-    "ru": "🇷🇺 Русский",
-    "hi": "🇮🇳 हिन्दी"
+# API এন্ডপয়েন্ট (একাধিক সোর্স)
+API_SOURCES = {
+    "coingecko": {
+        "search": "https://api.coingecko.com/api/v3/search?query={query}",
+        "price": "https://api.coingecko.com/api/v3/simple/price?ids={id}&vs_currencies=usd",
+        "markets": "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=20&page=1&sparkline=false"
+    },
+    "coincap": {
+        "search": "https://api.coincap.io/v2/assets?search={query}&limit=1",
+        "price": "https://api.coincap.io/v2/assets/{id}",
+        "markets": "https://api.coincap.io/v2/assets?limit=20"
+    },
+    "coinpaprika": {
+        "search": "https://api.coinpaprika.com/v1/search?q={query}&c=currencies&limit=1",
+        "price": "https://api.coinpaprika.com/v1/tickers/{id}",
+        "markets": "https://api.coinpaprika.com/v1/tickers?quotes=USD&limit=20"
+    }
 }
+FRANKFURTER_API = "https://api.frankfurter.app/latest?from=USD&to=BDT"
 
-# টেক্সট ট্রান্সলেশন (৪ ভাষায়)
+# ------------------------- ভাষা টেক্সট (পূর্ণ) -------------------------
 TEXTS = {
     "bn": {
         "welcome": "🌟 ক্রিপ্টো মার্কেট বটে স্বাগতম! 🌟\n\nআমি লাইভ কয়েনের দাম USD ও BDT তে দেখাই। নিচের মেনু ব্যবহার করুন।",
@@ -153,14 +164,112 @@ TEXTS = {
 }
 
 # লগিং সেটআপ
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ------------------------- JSONBin হেল্পার -------------------------
+# ------------------------- দ্রুততম API রেস ফাংশন -------------------------
+def fastest_request(api_calls: List[Tuple[str, str, Dict]]) -> Optional[Any]:
+    def fetch(method, url, params):
+        try:
+            if method == "GET":
+                resp = requests.get(url, params=params, timeout=3)
+                if resp.status_code == 200:
+                    return resp.json()
+        except:
+            pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(api_calls)) as executor:
+        futures = []
+        for method, url_tpl, params in api_calls:
+            url = url_tpl.format(**params) if params else url_tpl
+            futures.append(executor.submit(fetch, method, url, params if not url_tpl.startswith("http") else {}))
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result is not None:
+                return result
+    return None
+
+# ------------------------- API হেল্পার -------------------------
+def get_usd_bdt_rate() -> float:
+    try:
+        resp = requests.get(FRANKFURTER_API, timeout=4)
+        return resp.json()["rates"]["BDT"]
+    except:
+        return 118.0
+
+def search_coins(query: str) -> List[Dict]:
+    calls = [
+        ("GET", API_SOURCES["coingecko"]["search"].format(query=query), {}),
+        ("GET", API_SOURCES["coincap"]["search"].format(query=query), {}),
+        ("GET", API_SOURCES["coinpaprika"]["search"].format(query=query), {}),
+    ]
+    data = fastest_request(calls)
+    if not data:
+        return []
+    if "coins" in data:
+        return data["coins"]
+    elif "data" in data:
+        assets = data.get("data", [])
+        return [{"id": a["id"], "name": a["name"], "symbol": a["symbol"]} for a in assets]
+    elif "currencies" in data:
+        currencies = data.get("currencies", [])
+        return [{"id": c["id"], "name": c["name"], "symbol": c["symbol"]} for c in currencies]
+    return []
+
+def get_coin_price(coin_id: str) -> Optional[Dict]:
+    calls = [
+        ("GET", API_SOURCES["coingecko"]["price"].format(id=coin_id), {}),
+        ("GET", API_SOURCES["coincap"]["price"].format(id=coin_id), {}),
+        ("GET", API_SOURCES["coinpaprika"]["price"].format(id=coin_id), {}),
+    ]
+    data = fastest_request(calls)
+    if not data:
+        return None
+    if coin_id in data and "usd" in data[coin_id]:
+        return data[coin_id]
+    elif "data" in data and "priceUsd" in data["data"]:
+        return {"usd": float(data["data"]["priceUsd"])}
+    elif "quotes" in data and "USD" in data["quotes"]:
+        return {"usd": data["quotes"]["USD"]["price"]}
+    return None
+
+def get_top_coins(limit: int = 20) -> List[Dict]:
+    calls = [
+        ("GET", API_SOURCES["coingecko"]["markets"], {}),
+        ("GET", API_SOURCES["coincap"]["markets"], {}),
+        ("GET", API_SOURCES["coinpaprika"]["markets"], {}),
+    ]
+    data = fastest_request(calls)
+    if not data:
+        return []
+    if isinstance(data, list) and len(data) > 0 and "current_price" in data[0]:
+        return data
+    elif "data" in data:
+        assets = data["data"][:limit]
+        result = []
+        for a in assets:
+            result.append({
+                "name": a["name"],
+                "symbol": a["symbol"],
+                "current_price": float(a["priceUsd"]),
+                "price_change_percentage_24h": float(a.get("changePercent24Hr", 0))
+            })
+        return result
+    elif isinstance(data, list) and len(data) > 0 and "quotes" in data[0]:
+        result = []
+        for ticker in data[:limit]:
+            result.append({
+                "name": ticker["name"],
+                "symbol": ticker["symbol"],
+                "current_price": ticker["quotes"]["USD"]["price"],
+                "price_change_percentage_24h": ticker["quotes"]["USD"].get("percent_change_24h", 0)
+            })
+        return result
+    return []
+
+# ------------------------- JSONBin ডাটাবেজ -------------------------
 def load_db() -> Dict:
-    """JSONBin থেকে ডাটাবেজ লোড করে।"""
     headers = {
         "X-Master-Key": JSONBIN_MASTER_KEY,
         "X-Access-Key": JSONBIN_ACCESS_KEY
@@ -178,7 +287,6 @@ def load_db() -> Dict:
         }
 
 def save_db(data: Dict) -> bool:
-    """JSONBin-এ ডাটাবেজ সেভ করে।"""
     headers = {
         "X-Master-Key": JSONBIN_MASTER_KEY,
         "X-Access-Key": JSONBIN_ACCESS_KEY,
@@ -193,12 +301,10 @@ def save_db(data: Dict) -> bool:
         return False
 
 def get_user_lang(user_id: int) -> str:
-    """ইউজারের সংরক্ষিত ভাষা রিটার্ন করে, না থাকলে ডিফল্ট 'en'।"""
     db = load_db()
     return db.get("users", {}).get(str(user_id), {}).get("lang", "en")
 
 def set_user_lang(user_id: int, lang: str) -> None:
-    """ইউজারের ভাষা সংরক্ষণ করে।"""
     db = load_db()
     if "users" not in db:
         db["users"] = {}
@@ -210,69 +316,19 @@ def set_user_lang(user_id: int, lang: str) -> None:
     save_db(db)
 
 def increment_command_count() -> None:
-    """কমান্ড কাউন্ট বাড়ায়।"""
     db = load_db()
     db["stats"]["total_commands"] = db["stats"].get("total_commands", 0) + 1
     save_db(db)
 
 def get_stats() -> Tuple[int, int]:
-    """স্ট্যাটিস্টিক্স রিটার্ন করে।"""
     db = load_db()
     stats = db.get("stats", {})
     return stats.get("total_users", 0), stats.get("total_commands", 0)
 
-# ------------------------- API হেল্পার -------------------------
-def get_usd_bdt_rate() -> float:
-    """Frankfurter API থেকে লাইভ USD → BDT রেট আনে।"""
-    try:
-        resp = requests.get(f"{FRANKFURTER_API}/latest?from=USD&to=BDT", timeout=5)
-        data = resp.json()
-        return data["rates"]["BDT"]
-    except Exception as e:
-        logger.error(f"Forex error: {e}")
-        return 118.0  # ফলব্যাক রেট
-
-def search_coins(query: str) -> List[Dict]:
-    """CoinGecko search API ব্যবহার করে কয়েন খোঁজে।"""
-    try:
-        resp = requests.get(f"{COINGECKO_API}/search?query={query}", timeout=10)
-        data = resp.json()
-        return data.get("coins", [])
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        return []
-
-def get_coin_price(coin_id: str) -> Optional[Dict]:
-    """নির্দিষ্ট কয়েনের দাম (USD) আনে।"""
-    try:
-        resp = requests.get(
-            f"{COINGECKO_API}/simple/price?ids={coin_id}&vs_currencies=usd",
-            timeout=10
-        )
-        data = resp.json()
-        return data.get(coin_id, {})
-    except Exception as e:
-        logger.error(f"Price error: {e}")
-        return None
-
-def get_top_coins(limit: int = 20) -> List[Dict]:
-    """শীর্ষ কয়েনের তালিকা আনে (মার্কেট ক্যাপ অনুযায়ী)।"""
-    try:
-        resp = requests.get(
-            f"{COINGECKO_API}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page={limit}&page=1&sparkline=false",
-            timeout=15
-        )
-        return resp.json()
-    except Exception as e:
-        logger.error(f"Top coins error: {e}")
-        return []
-
-# ------------------------- কনভার্সন হেল্পার -------------------------
+# ------------------------- কনভার্টার -------------------------
 async def convert_currency(amount: float, from_cur: str, to_cur: str) -> Optional[float]:
-    """ক্রিপ্টো ও ফিয়াট কনভার্ট করে।"""
     from_cur = from_cur.lower()
     to_cur = to_cur.lower()
-    
     if from_cur in ["usd", "bdt"] and to_cur in ["usd", "bdt"]:
         usd_bdt = get_usd_bdt_rate()
         if from_cur == "usd" and to_cur == "bdt":
@@ -281,7 +337,6 @@ async def convert_currency(amount: float, from_cur: str, to_cur: str) -> Optiona
             return amount / usd_bdt
         else:
             return amount
-    
     crypto_id = from_cur if from_cur not in ["usd", "bdt"] else to_cur
     coins = search_coins(crypto_id)
     if not coins:
@@ -292,7 +347,6 @@ async def convert_currency(amount: float, from_cur: str, to_cur: str) -> Optiona
         return None
     usd_price = price_data["usd"]
     usd_bdt = get_usd_bdt_rate()
-    
     if from_cur == crypto_id and to_cur == "usd":
         return amount * usd_price
     elif from_cur == crypto_id and to_cur == "bdt":
@@ -304,8 +358,18 @@ async def convert_currency(amount: float, from_cur: str, to_cur: str) -> Optiona
         return usd_amount / usd_price if usd_price != 0 else None
     return None
 
-# ------------------------- বাটন জেনারেটর -------------------------
-def main_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
+# ------------------------- কীবোর্ড জেনারেটর -------------------------
+def get_reply_keyboard(lang: str) -> ReplyKeyboardMarkup:
+    t = TEXTS[lang]
+    keyboard = [
+        [KeyboardButton(t["button_prices"]), KeyboardButton(t["button_search"])],
+        [KeyboardButton(t["button_calc"]), KeyboardButton(t["button_lang"])],
+        [KeyboardButton(t["button_help"]), KeyboardButton(t["button_dev"])],
+        [KeyboardButton(t["button_stats"])]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_inline_menu(lang: str) -> InlineKeyboardMarkup:
     t = TEXTS[lang]
     keyboard = [
         [InlineKeyboardButton(t["button_prices"], callback_data="prices")],
@@ -322,51 +386,48 @@ def main_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def language_keyboard() -> InlineKeyboardMarkup:
-    keyboard = [
+def back_keyboard_inline(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="start")]])
+
+def lang_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("🇧🇩 বাংলা", callback_data="lang_bn")],
         [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
         [InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru")],
         [InlineKeyboardButton("🇮🇳 हिन्दी", callback_data="lang_hi")],
         [InlineKeyboardButton("🔙 Back", callback_data="start")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def back_keyboard(lang: str) -> InlineKeyboardMarkup:
-    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="start")]]
-    return InlineKeyboardMarkup(keyboard)
+    ])
 
 # ------------------------- হ্যান্ডলার -------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
-    await update.message.reply_text(
-        t["welcome"],
-        reply_markup=main_menu_keyboard(lang),
-        parse_mode=ParseMode.HTML
-    )
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(t["welcome"], reply_markup=get_reply_keyboard(lang))
+    else:
+        await update.message.reply_text(t["welcome"], reply_markup=get_inline_menu(lang))
     increment_command_count()
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
-    await update.message.reply_text(
-        t["help"],
-        reply_markup=back_keyboard(lang),
-        parse_mode=ParseMode.HTML
-    )
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(t["help"], reply_markup=get_reply_keyboard(lang))
+    else:
+        await update.message.reply_text(t["help"], reply_markup=back_keyboard_inline(lang))
     increment_command_count()
 
-async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
+    is_private = update.effective_chat.type == "private"
     msg = await update.message.reply_text(t["fetching"])
     coins = get_top_coins(20)
     if not coins:
-        await msg.edit_text(t["no_price"])
+        await msg.edit_text(t["no_price"]) if not is_private else await msg.edit_text(t["no_price"])
         return
     usd_bdt = get_usd_bdt_rate()
     lines = [f"<b>{t['top_coins']}</b>\n"]
@@ -377,78 +438,57 @@ async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         bdt = usd * usd_bdt
         change = coin.get('price_change_percentage_24h', 0)
         arrow = "📈" if change >= 0 else "📉"
-        lines.append(
-            f"{arrow} <b>{name} ({symbol})</b>\n"
-            f"   💵 ${usd:,.4f} | ৳{bdt:,.2f}   {change:+.2f}%"
-        )
+        lines.append(f"{arrow} <b>{name} ({symbol})</b>\n   💵 ${usd:,.4f} | ৳{bdt:,.2f}   {change:+.2f}%")
     text = "\n".join(lines)
-    await msg.edit_text(
-        text,
-        reply_markup=back_keyboard(lang),
-        parse_mode=ParseMode.HTML
-    )
+    if is_private:
+        await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_reply_keyboard(lang))
+    else:
+        await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard_inline(lang))
     increment_command_count()
 
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
+    is_private = update.effective_chat.type == "private"
     if not context.args:
-        await update.message.reply_text(
-            t["search_usage"],
-            reply_markup=back_keyboard(lang)
-        )
+        await update.message.reply_text(t["search_usage"], reply_markup=back_keyboard_inline(lang) if not is_private else get_reply_keyboard(lang))
         return
     query = " ".join(context.args)
     msg = await update.message.reply_text(t["fetching"])
     coins = search_coins(query)
     if not coins:
-        await msg.edit_text(t["coin_not_found"], reply_markup=back_keyboard(lang))
+        await msg.edit_text(t["coin_not_found"], reply_markup=back_keyboard_inline(lang) if not is_private else get_reply_keyboard(lang))
         return
     coin = coins[0]
     price_data = get_coin_price(coin["id"])
     if not price_data or "usd" not in price_data:
-        await msg.edit_text(t["no_price"], reply_markup=back_keyboard(lang))
+        await msg.edit_text(t["no_price"], reply_markup=back_keyboard_inline(lang) if not is_private else get_reply_keyboard(lang))
         return
     usd = price_data["usd"]
     usd_bdt = get_usd_bdt_rate()
     bdt = usd * usd_bdt
-    text = t["price_info"].format(
-        name=coin['name'],
-        symbol=coin['symbol'].upper(),
-        usd=f"{usd:,.4f}",
-        bdt=f"{bdt:,.2f}",
-        id=coin['id']
-    )
+    text = t["price_info"].format(name=coin['name'], symbol=coin['symbol'].upper(), usd=f"{usd:,.4f}", bdt=f"{bdt:,.2f}", id=coin['id'])
     text += f"\n\n💡 {t['cal_hint']}"
     keyboard = [
         [InlineKeyboardButton("🧮 Quick Convert", callback_data=f"calc_{coin['id']}")],
         [InlineKeyboardButton("🔙 Back", callback_data="start")]
     ]
-    await msg.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.HTML
-    )
+    await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
     increment_command_count()
 
-async def cal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
+    is_private = update.effective_chat.type == "private"
     if not context.args or len(context.args) < 4:
-        await update.message.reply_text(
-            t["calc_prompt"],
-            reply_markup=back_keyboard(lang)
-        )
+        await update.message.reply_text(t["calc_prompt"], reply_markup=back_keyboard_inline(lang) if not is_private else get_reply_keyboard(lang))
         return
     text = " ".join(context.args)
     match = re.match(r"^([\d.]+)\s+(\w+)\s+to\s+(\w+)$", text, re.IGNORECASE)
     if not match:
-        await update.message.reply_text(
-            t["conversion_error"],
-            reply_markup=back_keyboard(lang)
-        )
+        await update.message.reply_text(t["conversion_error"], reply_markup=back_keyboard_inline(lang) if not is_private else get_reply_keyboard(lang))
         return
     amount = float(match.group(1))
     from_cur = match.group(2).lower()
@@ -456,73 +496,58 @@ async def cal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     msg = await update.message.reply_text(t["fetching"])
     result = await convert_currency(amount, from_cur, to_cur)
     if result is None:
-        await msg.edit_text(t["conversion_error"], reply_markup=back_keyboard(lang))
+        await msg.edit_text(t["conversion_error"], reply_markup=back_keyboard_inline(lang) if not is_private else get_reply_keyboard(lang))
         return
     to_amount = f"{result:,.8f}".rstrip('0').rstrip('.') if '.' in f"{result:,.8f}" else f"{result:,.0f}"
-    text_out = t["conversion_result"].format(
-        from_amount=f"{amount:,.4f}",
-        from_currency=from_cur.upper(),
-        to_amount=to_amount,
-        to_currency=to_cur.upper()
-    )
-    await msg.edit_text(
-        text_out + f"\n\n💡 {t['cal_hint']}",
-        reply_markup=back_keyboard(lang),
-        parse_mode=ParseMode.HTML
-    )
+    text_out = t["conversion_result"].format(from_amount=f"{amount:,.4f}", from_currency=from_cur.upper(), to_amount=to_amount, to_currency=to_cur.upper())
+    await msg.edit_text(text_out + f"\n\n💡 {t['cal_hint']}", reply_markup=back_keyboard_inline(lang) if not is_private else get_reply_keyboard(lang), parse_mode=ParseMode.HTML)
     increment_command_count()
 
-async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
-    await update.message.reply_text(
-        t["select_lang"],
-        reply_markup=language_keyboard()
-    )
+    await update.message.reply_text(t["select_lang"], reply_markup=lang_keyboard())
     increment_command_count()
 
-async def developer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def developer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
-    await update.message.reply_text(
-        t["developer"],
-        reply_markup=back_keyboard(lang)
-    )
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(t["developer"], reply_markup=get_reply_keyboard(lang))
+    else:
+        await update.message.reply_text(t["developer"], reply_markup=back_keyboard_inline(lang))
     increment_command_count()
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
     users, commands = get_stats()
-    await update.message.reply_text(
-        t["stats"].format(users=users, commands=commands),
-        reply_markup=back_keyboard(lang)
-    )
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(t["stats"].format(users=users, commands=commands), reply_markup=get_reply_keyboard(lang))
+    else:
+        await update.message.reply_text(t["stats"].format(users=users, commands=commands), reply_markup=back_keyboard_inline(lang))
     increment_command_count()
 
-# ------------------------- ক্যালব্যাক কোয়েরি হ্যান্ডলার -------------------------
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ------------------------- ক্যালব্যাক হ্যান্ডলার -------------------------
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     user_id = query.from_user.id
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
-    
+    is_private = update.effective_chat.type == "private"
+
     if data == "start":
-        await query.edit_message_text(
-            t["welcome"],
-            reply_markup=main_menu_keyboard(lang),
-            parse_mode=ParseMode.HTML
-        )
+        await query.edit_message_text(t["welcome"], reply_markup=get_inline_menu(lang))
     elif data == "prices":
         await query.edit_message_text(t["fetching"])
         coins = get_top_coins(20)
         if not coins:
-            await query.edit_message_text(t["no_price"], reply_markup=back_keyboard(lang))
+            await query.edit_message_text(t["no_price"], reply_markup=back_keyboard_inline(lang))
             return
         usd_bdt = get_usd_bdt_rate()
         lines = [f"<b>{t['top_coins']}</b>\n"]
@@ -533,83 +558,73 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             bdt = usd * usd_bdt
             change = coin.get('price_change_percentage_24h', 0)
             arrow = "📈" if change >= 0 else "📉"
-            lines.append(
-                f"{arrow} <b>{name} ({symbol})</b>\n"
-                f"   💵 ${usd:,.4f} | ৳{bdt:,.2f}   {change:+.2f}%"
-            )
+            lines.append(f"{arrow} <b>{name} ({symbol})</b>\n   💵 ${usd:,.4f} | ৳{bdt:,.2f}   {change:+.2f}%")
         text = "\n".join(lines)
-        await query.edit_message_text(
-            text,
-            reply_markup=back_keyboard(lang),
-            parse_mode=ParseMode.HTML
-        )
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard_inline(lang))
     elif data == "search_prompt":
-        await query.edit_message_text(
-            t["search_prompt"],
-            reply_markup=back_keyboard(lang)
-        )
+        await query.edit_message_text(t["search_prompt"], reply_markup=back_keyboard_inline(lang))
     elif data == "calc_prompt":
-        await query.edit_message_text(
-            t["calc_prompt"],
-            reply_markup=back_keyboard(lang)
-        )
+        await query.edit_message_text(t["calc_prompt"], reply_markup=back_keyboard_inline(lang))
     elif data == "lang_menu":
-        await query.edit_message_text(
-            t["select_lang"],
-            reply_markup=language_keyboard()
-        )
+        await query.edit_message_text(t["select_lang"], reply_markup=lang_keyboard())
     elif data == "help":
-        await query.edit_message_text(
-            t["help"],
-            reply_markup=back_keyboard(lang),
-            parse_mode=ParseMode.HTML
-        )
+        await query.edit_message_text(t["help"], reply_markup=back_keyboard_inline(lang), parse_mode=ParseMode.HTML)
     elif data == "developer":
-        await query.edit_message_text(
-            t["developer"],
-            reply_markup=back_keyboard(lang)
-        )
+        await query.edit_message_text(t["developer"], reply_markup=back_keyboard_inline(lang))
     elif data == "stats":
         users, commands = get_stats()
-        await query.edit_message_text(
-            t["stats"].format(users=users, commands=commands),
-            reply_markup=back_keyboard(lang)
-        )
+        await query.edit_message_text(t["stats"].format(users=users, commands=commands), reply_markup=back_keyboard_inline(lang))
     elif data.startswith("lang_"):
         new_lang = data.split("_")[1]
         set_user_lang(user_id, new_lang)
         t_new = TEXTS[new_lang]
-        await query.edit_message_text(
-            t_new["lang_changed"],
-            reply_markup=main_menu_keyboard(new_lang)
-        )
+        await query.edit_message_text(t_new["lang_changed"], reply_markup=get_inline_menu(new_lang))
     elif data.startswith("calc_"):
         coin_id = data.replace("calc_", "")
-        await query.edit_message_text(
-            f"🧮 Enter conversion for {coin_id.upper()}:\n"
-            f"Example: /cal 1 {coin_id} to usd",
-            reply_markup=back_keyboard(lang)
-        )
+        await query.edit_message_text(f"🧮 Enter conversion for {coin_id.upper()}:\nExample: /cal 1 {coin_id} to usd", reply_markup=back_keyboard_inline(lang))
     else:
-        await query.edit_message_text(t["invalid_input"], reply_markup=back_keyboard(lang))
+        await query.edit_message_text(t["invalid_input"], reply_markup=back_keyboard_inline(lang))
 
-# ------------------------- মেসেজ হ্যান্ডলার -------------------------
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ------------------------- মেসেজ হ্যান্ডলার (প্রাইভেট বাটন) -------------------------
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = get_user_lang(user_id)
+    text = update.message.text
+    t = TEXTS[lang]
     if update.effective_chat.type == "private":
-        user_id = update.effective_user.id
-        lang = get_user_lang(user_id)
-        t = TEXTS[lang]
-        await update.message.reply_text(
-            t["help"],
-            reply_markup=main_menu_keyboard(lang)
-        )
+        if text == t["button_prices"]:
+            await prices_command(update, context)
+        elif text == t["button_search"]:
+            await update.message.reply_text(t["search_prompt"], reply_markup=get_reply_keyboard(lang))
+        elif text == t["button_calc"]:
+            await update.message.reply_text(t["calc_prompt"], reply_markup=get_reply_keyboard(lang))
+        elif text == t["button_lang"]:
+            await lang_command(update, context)
+        elif text == t["button_help"]:
+            await help_command(update, context)
+        elif text == t["button_dev"]:
+            await developer_command(update, context)
+        elif text == t["button_stats"]:
+            await stats_command(update, context)
+        else:
+            await update.message.reply_text(t["help"], reply_markup=get_reply_keyboard(lang))
 
 # ------------------------- এরর হ্যান্ডলার -------------------------
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
 
+# ------------------------- Flask হেলথ চেক -------------------------
+flask_app = Flask(__name__)
+
+@flask_app.route('/health')
+def health():
+    return 'OK', 200
+
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=8080)
+
 # ------------------------- মেইন -------------------------
-def main() -> None:
+def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
@@ -622,8 +637,9 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
-    logger.info("Bot started polling...")
+    logger.info("Bot started with multi-API race, dual keyboard, and Flask health check.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
+    threading.Thread(target=run_flask, daemon=True).start()
     main()
