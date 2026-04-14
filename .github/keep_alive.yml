@@ -1,0 +1,16 @@
+name: Keep Telegram Bot Awake
+
+on:
+  schedule:
+    # প্রতি ১০ মিনিটে একবার রান হবে (UTC সময়)
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # ম্যানুয়ালি রান করার জন্য
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render URL to prevent sleep
+        run: |
+          # এখানে আপনার Render অ্যাপের URL দিন (শেষে /health বা পোর্ট দেবেন না)
+          curl -I https://আপনার-অ্যাপের-নাম.onrender.com
