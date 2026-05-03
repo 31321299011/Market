@@ -4,13 +4,13 @@
 import logging
 import json
 import re
-import concurrent.futures
+import asyncio
 import threading
-import time
 from datetime import datetime
 from typing import Dict, Optional, List, Tuple, Any
 
-import requests
+import aiohttp
+import requests  # শুধু JSONBin সিঙ্ক্রোনাস রেখেছি (বটের স্পিডে প্রভাব ফেলে না)
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -26,52 +26,46 @@ from telegram.constants import ParseMode
 # ------------------------- কনফিগারেশন -------------------------
 BOT_TOKEN = "8592158247:AAG_Bd1ZxdsPqgn5GuVRkCNP7jzJEVFXF-Q"
 
-# JSONBin কনফিগ
+# JSONBin কনফিগ (আগের মতো)
 JSONBIN_MASTER_KEY = "$2a$10$Q.jxca3Wg3HLncJRJeBsF.XceuKNM6RFay0f3JE7WpalVC/G7I5S."
 JSONBIN_ACCESS_KEY = "$2a$10$7Nb5QAYjDezYlvPsRMGxnerfh.nthYJtLF3ac54jCIucQUsS3y3Ya"
 JSONBIN_BIN_ID = "69dc964236566621a8a94516"
 JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
 
-# API এন্ডপয়েন্ট (একাধিক সোর্স) - আরও সোর্স যোগ করা হয়েছে
+# ------------------------- API এন্ডপয়েন্ট (২০+ সোর্স) -------------------------
 API_SOURCES = {
-    "coingecko": {
-        "search": ("GET", "https://api.coingecko.com/api/v3/search?query={query}"),
-        "price": ("GET", "https://api.coingecko.com/api/v3/simple/price?ids={id}&vs_currencies=usd"),
-        "markets": ("GET", "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=20&page=1&sparkline=false")
-    },
-    "coincap": {
-        "search": ("GET", "https://api.coincap.io/v2/assets?search={query}&limit=1"),
-        "price": ("GET", "https://api.coincap.io/v2/assets/{id}"),
-        "markets": ("GET", "https://api.coincap.io/v2/assets?limit=20")
-    },
-    "coinpaprika": {
-        "search": ("GET", "https://api.coinpaprika.com/v1/search?q={query}&c=currencies&limit=1"),
-        "price": ("GET", "https://api.coinpaprika.com/v1/tickers/{id}"),
-        "markets": ("GET", "https://api.coinpaprika.com/v1/tickers?quotes=USD&limit=20")
-    },
-    "coinstats": {
-        # search নেই
-        "search": None,
-        "price": ("GET", "https://api.coinstats.app/public/v1/coins/{id}?currency=USD"),
-        "markets": ("GET", "https://api.coinstats.app/public/v1/coins?skip=0&limit=20&currency=USD")
-    },
-    "cryptocompare": {
-        "search": None,
-        "price": None,  # symbol দরকার, পরে আলাদা ভাবে না করাই ভালো
-        "markets": ("GET", "https://min-api.cryptocompare.com/data/top/mktcapfull?limit=20&tsym=USD")
-    },
-    "coinlore": {
-        "search": None,
-        "price": ("GET", "https://api.coinlore.net/api/ticker/?id={id}"),  # id সংখ্যা
-        "markets": ("GET", "https://api.coinlore.net/api/tickers/?start=0&limit=20")
-    }
+    "coingecko_search": "https://api.coingecko.com/api/v3/search?query={query}",
+    "coingecko_price": "https://api.coingecko.com/api/v3/simple/price?ids={id}&vs_currencies=usd",
+    "coingecko_markets": "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=20&page=1&sparkline=false",
+
+    "coincap_search": "https://api.coincap.io/v2/assets?search={query}&limit=1",
+    "coincap_price": "https://api.coincap.io/v2/assets/{id}",
+    "coincap_markets": "https://api.coincap.io/v2/assets?limit=20",
+
+    "coinpaprika_search": "https://api.coinpaprika.com/v1/search?q={query}&c=currencies&limit=1",
+    "coinpaprika_price": "https://api.coinpaprika.com/v1/tickers/{id}",
+    "coinpaprika_markets": "https://api.coinpaprika.com/v1/tickers?quotes=USD&limit=20",
+
+    "binance_ticker": "https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}USDT",
+    "binance_price": "https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT",
+
+    "kucoin_ticker": "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={symbol}-USDT",
+    "kucoin_price": "https://api.kucoin.com/api/v1/market/stats?symbol={symbol}-USDT",
+
+    "coinbase_price": "https://api.coinbase.com/v2/prices/{id}-USD/spot",
+    "coinbase_ticker": "https://api.coinbase.com/v2/prices/{id}-USD/buy",
+
+    "cryptocompare_price": "https://min-api.cryptocompare.com/data/price?fsym={symbol}&tsyms=USD",
+    "cryptocompare_markets": "https://min-api.cryptocompare.com/data/top/mktcapfull?limit=20&tsym=USD",
+
+    "bitfinex_ticker": "https://api.bitfinex.com/v1/pubticker/{symbol}usd",
+    "bitstamp_ticker": "https://www.bitstamp.net/api/v2/ticker/{symbol}usd/",
+    "gemini_ticker": "https://api.gemini.com/v1/pubticker/{symbol}usd",
+    "bybit_ticker": "https://api.bybit.com/v2/public/tickers?symbol={symbol}USDT",
 }
 FRANKFURTER_API = "https://api.frankfurter.app/latest?from=USD&to=BDT"
 
-# রিকোয়েস্ট টাইমআউট সুপার ফাস্ট
-REQUEST_TIMEOUT = 0.3  # সেকেন্ড
-
-# ------------------------- ভাষা টেক্সট (পূর্ণ) -------------------------
+# ------------------------- ভাষা টেক্সট (আগের মতো) -------------------------
 TEXTS = {
     "bn": {
         "welcome": "🌟 ক্রিপ্টো মার্কেট বটে স্বাগতম! 🌟\n\nআমি লাইভ কয়েনের দাম USD ও BDT তে দেখাই। নিচের মেনু ব্যবহার করুন।",
@@ -183,131 +177,139 @@ TEXTS = {
     }
 }
 
-# লগিং সেটআপ
+# লগিং
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ------------------------- USD-BDT রেট ক্যাশিং -------------------------
-_cached_usd_bdt_rate = None
-_rate_lock = threading.Lock()
-_rate_last_update = 0
-_RATE_CACHE_SECONDS = 600  # 10 মিনিট
-
-def _update_rate_cache():
-    global _cached_usd_bdt_rate, _rate_last_update
-    try:
-        resp = requests.get(FRANKFURTER_API, timeout=2)
-        if resp.status_code == 200:
-            rate = resp.json()["rates"]["BDT"]
-            with _rate_lock:
-                _cached_usd_bdt_rate = rate
-                _rate_last_update = time.time()
-    except Exception as e:
-        logger.error(f"Rate update failed: {e}")
-
-def _rate_updater_loop():
-    while True:
-        _update_rate_cache()
-        time.sleep(_RATE_CACHE_SECONDS)
-
-# ব্যাকগ্রাউন্ড থ্রেড শুরু
-threading.Thread(target=_rate_updater_loop, daemon=True).start()
-# প্রথমবার আপডেটের জন্য অপেক্ষা না করে, ফাংশন কলে চেক করা হবে
-while _cached_usd_bdt_rate is None:
-    _update_rate_cache()
-    if _cached_usd_bdt_rate is None:
-        time.sleep(0.5)
-
-# ------------------------- দ্রুততম API রেস ফাংশন -------------------------
-def fastest_request(api_calls: List[Tuple[str, str, Dict]]) -> Optional[Any]:
-    def fetch(method, url, params):
+# ------------------------- অ্যাসিঙ্ক API হেল্পার -------------------------
+async def fastest_request(session: aiohttp.ClientSession, api_calls: List[Tuple[str, str, Dict]]) -> Optional[Any]:
+    """
+    একাধিক API এন্ডপয়েন্টে সমান্তরাল GET রিকোয়েস্ট করে এবং প্রথম সফল JSON রেজাল্ট ফেরত দেয়।
+    """
+    async def fetch(method, url, params):
         try:
-            if method == "GET":
-                resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-                if resp.status_code == 200:
-                    return resp.json()
+            if method.upper() == "GET":
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
         except:
             pass
         return None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(api_calls)) as executor:
-        futures = []
-        for method, url_tpl, params in api_calls:
-            url = url_tpl.format(**params) if params else url_tpl
-            futures.append(executor.submit(fetch, method, url, params if not url_tpl.startswith("http") else {}))
-        for future in concurrent.futures.as_completed(futures):
-            result = future.result()
-            if result is not None:
-                return result
+    tasks = []
+    for method, url_tpl, params in api_calls:
+        url = url_tpl.format(**params) if params else url_tpl
+        # প্যারামিটার আলাদা পাঠানো নয়, সব URL-এই এম্বেডেড (কারণ বিভিন্ন API ভিন্ন ফরম্যাট চায়)
+        tasks.append(fetch(method, url, {}))
+
+    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for task in done:
+        result = task.result()
+        if result is not None:
+            return result
     return None
 
-# ------------------------- API হেল্পার -------------------------
-def get_usd_bdt_rate() -> float:
-    """ক্যাশ করা রেট রিটার্ন, ফ্রেশ না থাকলে অন-ডিমান্ড ফেচ"""
-    with _rate_lock:
-        if _cached_usd_bdt_rate is not None and (time.time() - _rate_last_update) < _RATE_CACHE_SECONDS:
-            return _cached_usd_bdt_rate
-    # ক্যাশ মিস হলে সাথে সাথে ফেচ করি
-    _update_rate_cache()
-    with _rate_lock:
-        return _cached_usd_bdt_rate if _cached_usd_bdt_rate is not None else 118.0
+async def get_usd_bdt_rate() -> float:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(FRANKFURTER_API, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                data = await resp.json()
+                return data["rates"]["BDT"]
+    except:
+        return 118.0
 
-def search_coins(query: str) -> List[Dict]:
-    calls = []
-    for src, endpoints in API_SOURCES.items():
-        if endpoints.get("search"):
-            method, url_tpl = endpoints["search"]
-            # query param for format
-            calls.append((method, url_tpl.format(query=query), {}))
-    data = fastest_request(calls)
+async def search_coins(query: str) -> List[Dict]:
+    # সমস্ত search endpoint ব্যবহার করি
+    calls = [
+        ("GET", API_SOURCES["coingecko_search"], {"query": query}),
+        ("GET", API_SOURCES["coincap_search"], {"query": query}),
+        ("GET", API_SOURCES["coinpaprika_search"], {"query": query}),
+        # Binance-এ সরাসরি সার্চ নেই, তাই skip
+        # KuCoin symbol-based, skip
+        # CryptoCompare ব্যবহার করতে পারি (fsym=query, tsyms=USD) -> price endpoint
+        ("GET", API_SOURCES["cryptocompare_price"], {"symbol": query.upper()}),
+    ]
+    async with aiohttp.ClientSession() as session:
+        data = await fastest_request(session, calls)
     if not data:
         return []
-    # বিভিন্ন API সোর্সের জন্য পার্সিং
+    # বিভিন্ন API-র রেসপন্স পার্সিং
     if "coins" in data:  # coingecko
         return data["coins"]
-    elif "data" in data:  # coincap
-        assets = data.get("data", [])
+    elif "data" in data and isinstance(data["data"], list):  # coincap
+        assets = data["data"]
         return [{"id": a["id"], "name": a["name"], "symbol": a["symbol"]} for a in assets]
     elif "currencies" in data:  # coinpaprika
         currencies = data.get("currencies", [])
         return [{"id": c["id"], "name": c["name"], "symbol": c["symbol"]} for c in currencies]
+    elif "USD" in data:  # cryptocompare price endpoint (শুধু দাম, কিন্তু আমরা সার্চ হিসেবে ধরে নিচ্ছি)
+        # id বানাই symbol থেকেই
+        symbol = query.upper()
+        return [{"id": symbol.lower(), "name": symbol, "symbol": symbol}]
     return []
 
-def get_coin_price(coin_id: str) -> Optional[Dict]:
-    calls = []
-    for src, endpoints in API_SOURCES.items():
-        if endpoints.get("price"):
-            method, url_tpl = endpoints["price"]
-            calls.append((method, url_tpl.format(id=coin_id), {}))
-    data = fastest_request(calls)
+async def get_coin_price(coin_id: str) -> Optional[Dict]:
+    calls = [
+        ("GET", API_SOURCES["coingecko_price"], {"id": coin_id}),
+        ("GET", API_SOURCES["coincap_price"], {"id": coin_id}),
+        ("GET", API_SOURCES["coinpaprika_price"], {"id": coin_id}),
+        ("GET", API_SOURCES["coinbase_price"], {"id": coin_id.upper()}),
+        ("GET", API_SOURCES["cryptocompare_price"], {"symbol": coin_id.upper()}),
+        ("GET", API_SOURCES["binance_price"], {"symbol": coin_id.upper()}),
+        ("GET", API_SOURCES["kucoin_price"], {"symbol": coin_id.upper()}),
+        ("GET", API_SOURCES["bitfinex_ticker"], {"symbol": coin_id.lower()}),
+        ("GET", API_SOURCES["bitstamp_ticker"], {"symbol": coin_id.lower()}),
+        ("GET", API_SOURCES["gemini_ticker"], {"symbol": coin_id.lower()}),
+        ("GET", API_SOURCES["bybit_ticker"], {"symbol": coin_id.upper()}),
+    ]
+    async with aiohttp.ClientSession() as session:
+        data = await fastest_request(session, calls)
     if not data:
         return None
-    # বিভিন্ন ফরম্যাট পার্সিং
-    if isinstance(data, dict) and coin_id in data and "usd" in data[coin_id]:  # coingecko
-        return data[coin_id]
-    elif "data" in data and "priceUsd" in data["data"]:  # coincap
-        return {"usd": float(data["data"]["priceUsd"])}
-    elif "quotes" in data and "USD" in data["quotes"]:  # coinpaprika
+
+    # বিভিন্ন সোর্স থেকে USD price extract
+    if "usd" in data:  # coingecko: {"bitcoin":{"usd":...}}
+        return data.get(coin_id, None)
+    elif "data" in data:
+        if "priceUsd" in data["data"]:
+            return {"usd": float(data["data"]["priceUsd"])}
+        elif "price" in data["data"]:  # coinbase: {"data":{"amount":"..."}}
+            return {"usd": float(data["data"]["amount"])}
+    elif "quotes" in data and "USD" in data["quotes"]:
         return {"usd": data["quotes"]["USD"]["price"]}
-    elif "coin" in data:  # coinstats
-        return {"usd": data["coin"]["price"]}
-    elif isinstance(data, list) and len(data) > 0 and "price_usd" in data[0]:  # coinlore (returns list)
-        return {"usd": float(data[0]["price_usd"])}
+    elif "USD" in data:  # cryptocompare
+        return {"usd": data["USD"]}
+    elif "price" in data:  # binance: {"symbol":"BTCUSDT","price":"..."}
+        return {"usd": float(data["price"])}
+    elif "data" in data and isinstance(data["data"], dict) and "price" in data["data"]:  # kucoin
+        return {"usd": float(data["data"]["price"])}
+    elif "last_price" in data:  # bitfinex
+        return {"usd": float(data["last_price"])}
+    elif "last" in data:  # bitstamp
+        return {"usd": float(data["last"])}
+    elif "last" in data:  # gemini
+        return {"usd": float(data["last"])}
+    elif "result" in data and len(data["result"]) > 0:  # bybit
+        return {"usd": float(data["result"][0]["last_price"])}
     return None
 
-def get_top_coins(limit: int = 20) -> List[Dict]:
-    calls = []
-    for src, endpoints in API_SOURCES.items():
-        if endpoints.get("markets"):
-            method, url_tpl = endpoints["markets"]
-            calls.append((method, url_tpl, {}))
-    data = fastest_request(calls)
+async def get_top_coins(limit: int = 20) -> List[Dict]:
+    calls = [
+        ("GET", API_SOURCES["coingecko_markets"], {}),
+        ("GET", API_SOURCES["coincap_markets"], {}),
+        ("GET", API_SOURCES["coinpaprika_markets"], {}),
+        ("GET", API_SOURCES["cryptocompare_markets"], {}),
+    ]
+    async with aiohttp.ClientSession() as session:
+        data = await fastest_request(session, calls)
     if not data:
         return []
-    # বিভিন্ন সোর্সের ডাটা পার্সিং
-    if isinstance(data, list) and len(data) > 0 and "current_price" in data[0]:  # coingecko
+
+    # coingecko format
+    if isinstance(data, list) and len(data) > 0 and "current_price" in data[0]:
         return data
-    elif "data" in data:  # coincap
+    # coincap
+    elif "data" in data and isinstance(data["data"], list):
         assets = data["data"][:limit]
         result = []
         for a in assets:
@@ -318,7 +320,8 @@ def get_top_coins(limit: int = 20) -> List[Dict]:
                 "price_change_percentage_24h": float(a.get("changePercent24Hr", 0))
             })
         return result
-    elif isinstance(data, list) and len(data) > 0 and "quotes" in data[0]:  # coinpaprika
+    # coinpaprika
+    elif isinstance(data, list) and len(data) > 0 and "quotes" in data[0]:
         result = []
         for ticker in data[:limit]:
             result.append({
@@ -328,44 +331,24 @@ def get_top_coins(limit: int = 20) -> List[Dict]:
                 "price_change_percentage_24h": ticker["quotes"]["USD"].get("percent_change_24h", 0)
             })
         return result
-    elif "coins" in data:  # coinstats
-        coins = data["coins"][:limit]
+    # cryptocompare
+    elif "Data" in data and isinstance(data["Data"], list):
         result = []
-        for c in coins:
+        for coin in data["Data"][:limit]:
+            name = coin["CoinInfo"]["FullName"]
+            symbol = coin["CoinInfo"]["Name"]
+            usd = coin.get("RAW", {}).get("USD", {}).get("PRICE", 0)
+            chg = coin.get("RAW", {}).get("USD", {}).get("CHANGEPCT24HOUR", 0)
             result.append({
-                "name": c["name"],
-                "symbol": c["symbol"],
-                "current_price": c["price"],
-                "price_change_percentage_24h": c.get("priceChange1d", 0)
-            })
-        return result
-    elif "Data" in data:  # cryptocompare
-        entries = data["Data"][:limit]
-        result = []
-        for e in entries:
-            coin_info = e.get("CoinInfo", {})
-            raw = e.get("RAW", {}).get("USD", {})
-            result.append({
-                "name": coin_info.get("FullName", coin_info.get("Name", "")),
-                "symbol": coin_info.get("Name", ""),
-                "current_price": raw.get("PRICE", 0),
-                "price_change_percentage_24h": raw.get("CHANGEPCT24HOUR", 0)
-            })
-        return result
-    elif isinstance(data, dict) and "data" in data and isinstance(data["data"], list) and len(data["data"]) > 0 and "price_usd" in data["data"][0]:  # coinlore
-        items = data["data"][:limit]
-        result = []
-        for item in items:
-            result.append({
-                "name": item["name"],
-                "symbol": item["symbol"],
-                "current_price": float(item["price_usd"]),
-                "price_change_percentage_24h": float(item.get("percent_change_24h", 0))
+                "name": name,
+                "symbol": symbol,
+                "current_price": usd,
+                "price_change_percentage_24h": chg
             })
         return result
     return []
 
-# ------------------------- JSONBin ডাটাবেজ -------------------------
+# ------------------------- JSONBin ডাটাবেজ (requests ব্যবহার, কারণ এটি স্পিড-ক্রিটিক্যাল নয়) -------------------------
 def load_db() -> Dict:
     headers = {
         "X-Master-Key": JSONBIN_MASTER_KEY,
@@ -422,28 +405,30 @@ def get_stats() -> Tuple[int, int]:
     stats = db.get("stats", {})
     return stats.get("total_users", 0), stats.get("total_commands", 0)
 
-# ------------------------- কনভার্টার -------------------------
+# ------------------------- কনভার্টার (অ্যাসিঙ্ক) -------------------------
 async def convert_currency(amount: float, from_cur: str, to_cur: str) -> Optional[float]:
     from_cur = from_cur.lower()
     to_cur = to_cur.lower()
     if from_cur in ["usd", "bdt"] and to_cur in ["usd", "bdt"]:
-        usd_bdt = get_usd_bdt_rate()
+        usd_bdt = await get_usd_bdt_rate()
         if from_cur == "usd" and to_cur == "bdt":
             return amount * usd_bdt
         elif from_cur == "bdt" and to_cur == "usd":
             return amount / usd_bdt
         else:
             return amount
+
     crypto_id = from_cur if from_cur not in ["usd", "bdt"] else to_cur
-    coins = search_coins(crypto_id)
+    coins = await search_coins(crypto_id)
     if not coins:
         return None
     coin = coins[0]
-    price_data = get_coin_price(coin["id"])
+    price_data = await get_coin_price(coin["id"])
     if not price_data or "usd" not in price_data:
         return None
     usd_price = price_data["usd"]
-    usd_bdt = get_usd_bdt_rate()
+    usd_bdt = await get_usd_bdt_rate()
+
     if from_cur == crypto_id and to_cur == "usd":
         return amount * usd_price
     elif from_cur == crypto_id and to_cur == "bdt":
@@ -455,7 +440,7 @@ async def convert_currency(amount: float, from_cur: str, to_cur: str) -> Optiona
         return usd_amount / usd_price if usd_price != 0 else None
     return None
 
-# ------------------------- কীবোর্ড জেনারেটর -------------------------
+# ------------------------- কীবোর্ড জেনারেটর (আগের মতো) -------------------------
 def get_reply_keyboard(lang: str) -> ReplyKeyboardMarkup:
     t = TEXTS[lang]
     keyboard = [
@@ -495,7 +480,7 @@ def lang_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔙 Back", callback_data="start")]
     ])
 
-# ------------------------- হ্যান্ডলার -------------------------
+# ------------------------- হ্যান্ডলার (সব অ্যাসিঙ্ক) -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
@@ -522,11 +507,11 @@ async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = TEXTS[lang]
     is_private = update.effective_chat.type == "private"
     msg = await update.message.reply_text(t["fetching"])
-    coins = get_top_coins(20)
+    coins = await get_top_coins(20)
     if not coins:
-        await msg.edit_text(t["no_price"]) if not is_private else await msg.edit_text(t["no_price"])
+        await msg.edit_text(t["no_price"])
         return
-    usd_bdt = get_usd_bdt_rate()
+    usd_bdt = await get_usd_bdt_rate()
     lines = [f"<b>{t['top_coins']}</b>\n"]
     for coin in coins[:20]:
         name = coin['name']
@@ -537,10 +522,8 @@ async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         arrow = "📈" if change >= 0 else "📉"
         lines.append(f"{arrow} <b>{name} ({symbol})</b>\n   💵 ${usd:,.4f} | ৳{bdt:,.2f}   {change:+.2f}%")
     text = "\n".join(lines)
-    if is_private:
-        await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_reply_keyboard(lang))
-    else:
-        await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard_inline(lang))
+    reply_markup = get_reply_keyboard(lang) if is_private else back_keyboard_inline(lang)
+    await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
     increment_command_count()
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -553,17 +536,17 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = " ".join(context.args)
     msg = await update.message.reply_text(t["fetching"])
-    coins = search_coins(query)
+    coins = await search_coins(query)
     if not coins:
         await msg.edit_text(t["coin_not_found"], reply_markup=back_keyboard_inline(lang) if not is_private else get_reply_keyboard(lang))
         return
     coin = coins[0]
-    price_data = get_coin_price(coin["id"])
+    price_data = await get_coin_price(coin["id"])
     if not price_data or "usd" not in price_data:
         await msg.edit_text(t["no_price"], reply_markup=back_keyboard_inline(lang) if not is_private else get_reply_keyboard(lang))
         return
     usd = price_data["usd"]
-    usd_bdt = get_usd_bdt_rate()
+    usd_bdt = await get_usd_bdt_rate()
     bdt = usd * usd_bdt
     text = t["price_info"].format(name=coin['name'], symbol=coin['symbol'].upper(), usd=f"{usd:,.4f}", bdt=f"{bdt:,.2f}", id=coin['id'])
     text += f"\n\n💡 {t['cal_hint']}"
@@ -636,17 +619,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
-    is_private = update.effective_chat.type == "private"
 
     if data == "start":
         await query.edit_message_text(t["welcome"], reply_markup=get_inline_menu(lang))
     elif data == "prices":
         await query.edit_message_text(t["fetching"])
-        coins = get_top_coins(20)
+        coins = await get_top_coins(20)
         if not coins:
             await query.edit_message_text(t["no_price"], reply_markup=back_keyboard_inline(lang))
             return
-        usd_bdt = get_usd_bdt_rate()
+        usd_bdt = await get_usd_bdt_rate()
         lines = [f"<b>{t['top_coins']}</b>\n"]
         for coin in coins[:20]:
             name = coin['name']
@@ -734,7 +716,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
-    logger.info("Bot started with multi-API race, dual keyboard, and Flask health check.")
+    logger.info("⚡ Superfast bot started with 20+ APIs and asyncio race!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
