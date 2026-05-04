@@ -4,9 +4,9 @@
 import logging
 import json
 import re
+import concurrent.futures
 import threading
 import time
-import queue
 from datetime import datetime
 from typing import Dict, Optional, List, Tuple, Any
 
@@ -26,11 +26,13 @@ from telegram.constants import ParseMode
 # ------------------------- কনফিগারেশন -------------------------
 BOT_TOKEN = "8592158247:AAG_Bd1ZxdsPqgn5GuVRkCNP7jzJEVFXF-Q"
 
+# JSONBin কনফিগ
 JSONBIN_MASTER_KEY = "$2a$10$Q.jxca3Wg3HLncJRJeBsF.XceuKNM6RFay0f3JE7WpalVC/G7I5S."
 JSONBIN_ACCESS_KEY = "$2a$10$7Nb5QAYjDezYlvPsRMGxnerfh.nthYJtLF3ac54jCIucQUsS3y3Ya"
 JSONBIN_BIN_ID = "69dc964236566621a8a94516"
 JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
 
+# API এন্ডপয়েন্ট (দ্রুততম + ফাস্ট ফ্যালব্যাক)
 API_SOURCES = {
     "coingecko": {
         "search": "https://api.coingecko.com/api/v3/search?query={query}",
@@ -46,11 +48,27 @@ API_SOURCES = {
         "search": "https://api.coinpaprika.com/v1/search?q={query}&c=currencies&limit=1",
         "price": "https://api.coinpaprika.com/v1/tickers/{id}",
         "markets": "https://api.coinpaprika.com/v1/tickers?quotes=USD&limit=20"
+    },
+    "binance": {
+        "search": None,
+        "price": "https://api.binance.com/api/v3/ticker/price?symbol={id}USDT",
+        "markets": None
+    },
+    "kucoin": {
+        "search": None,
+        "price": "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={id}-USDT",
+        "markets": None
     }
 }
 FRANKFURTER_API = "https://api.frankfurter.app/latest?from=USD&to=BDT"
 
-# ------------------------- ভাষা টেক্সট (পূর্ণ) -------------------------
+# গ্লোবাল ক্যাশে (USD→BDT)
+_usd_bdt_cache = {"rate": 118.0, "ts": 0}
+
+# থ্রেড পুল (persistent) – max workers 15
+EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=15)
+
+# ------------------------- ভাষা টেক্সট (অপরিবর্তিত) -------------------------
 TEXTS = {
     "bn": {
         "welcome": "🌟 ক্রিপ্টো মার্কেট বটে স্বাগতম! 🌟\n\nআমি লাইভ কয়েনের দাম USD ও BDT তে দেখাই। নিচের মেনু ব্যবহার করুন।",
@@ -162,193 +180,60 @@ TEXTS = {
     }
 }
 
-# ------------------------- অপ্টিমাইজেশন: গ্লোবাল রিসোর্স -------------------------
+# লগিং
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 1. HTTP সেশন পুনরায় ব্যবহার
-http_session = requests.Session()
-http_session.headers.update({"User-Agent": "CryptoBot/2.0"})
-
-# 2. একক থ্রেড পুল (পুনরায় তৈরি নয়)
-EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=50)
-
-# 3. ইন-মেমরি ডাটাবেজ ক্যাশ
-DB_CACHE = None
-DB_LOCK = threading.Lock()
-SAVE_QUEUE = queue.Queue()
-
-# 4. USD/BDT রেট ক্যাশ
-RATE_CACHE = {"rate": 118.0, "last_fetch": 0}
-RATE_TTL = 600  # 10 মিনিট
-
-# 5. ইউজার ল্যাঙ্গুয়েজ ক্যাশ
-USER_LANG_CACHE: Dict[int, str] = {}
-
-# ------------------------- দ্রুততম API রেস ফাংশন (গ্লোবাল এক্সিকিউটর) -------------------------
+# ------------------------- দ্রুততম API রেস (অপ্টিমাইজড) -------------------------
 def fastest_request(api_calls: List[Tuple[str, str, Dict]]) -> Optional[Any]:
-    def fetch(method, url, params):
+    def fetch(method, url):
         try:
             if method == "GET":
-                resp = http_session.get(url, params=params, timeout=2.5)  # টাইমআউট কমানো
+                resp = requests.get(url, timeout=0.8)  # 0.8s timeout
                 if resp.status_code == 200:
                     return resp.json()
-        except:
+        except Exception:
             pass
         return None
 
     futures = []
     for method, url_tpl, params in api_calls:
         url = url_tpl.format(**params) if params else url_tpl
-        futures.append(EXECUTOR.submit(fetch, method, url, params if not url_tpl.startswith("http") else {}))
-    
+        if url:
+            futures.append(EXECUTOR.submit(fetch, method, url))
+
     for future in concurrent.futures.as_completed(futures):
-        result = future.result()
-        if result is not None:
-            return result
+        try:
+            result = future.result()
+            if result is not None:
+                # Cancel pending futures (best effort)
+                for f in futures:
+                    f.cancel()
+                return result
+        except Exception:
+            continue
     return None
 
-# ------------------------- ডাটাবেজ হেল্পার (ইন-মেমরি + ব্যাকগ্রাউন্ড) -------------------------
-def _load_db_from_api() -> dict:
-    headers = {
-        "X-Master-Key": JSONBIN_MASTER_KEY,
-        "X-Access-Key": JSONBIN_ACCESS_KEY
-    }
-    try:
-        resp = http_session.get(JSONBIN_URL, headers=headers, timeout=8)
-        resp.raise_for_status()
-        data = resp.json().get("record", {})
-        # ensure default structure
-        data.setdefault("users", {})
-        data.setdefault("languages", ["bn", "en", "ru", "hi"])
-        data.setdefault("stats", {"total_users": 0, "total_commands": 0})
-        return data
-    except Exception as e:
-        logger.error(f"DB load error: {e}")
-        return {
-            "users": {},
-            "languages": ["bn", "en", "ru", "hi"],
-            "stats": {"total_users": 0, "total_commands": 0}
-        }
-
-def _save_db_to_api(data: dict):
-    headers = {
-        "X-Master-Key": JSONBIN_MASTER_KEY,
-        "X-Access-Key": JSONBIN_ACCESS_KEY,
-        "Content-Type": "application/json"
-    }
-    try:
-        resp = http_session.put(JSONBIN_URL, headers=headers, json=data, timeout=8)
-        resp.raise_for_status()
-    except Exception as e:
-        logger.error(f"DB save error: {e}")
-
-def init_db_cache():
-    global DB_CACHE
-    with DB_LOCK:
-        DB_CACHE = _load_db_from_api()
-    # ব্যাকগ্রাউন্ড সেভ থ্রেড শুরু
-    threading.Thread(target=background_db_saver, daemon=True).start()
-
-def background_db_saver():
-    while True:
-        try:
-            items = []
-            # ব্যাচ আকারে সেভ রিকোয়েস্ট নেওয়া
-            try:
-                while len(items) < 10:
-                    item = SAVE_QUEUE.get(timeout=30)  # প্রতি 30 সেকেন্ডে অন্তত একবার চেক
-                    if item is None:
-                        break
-                    items.append(item)
-            except queue.Empty:
-                pass
-            if items:
-                with DB_LOCK:
-                    # শেষ স্টেট নিয়ে সেভ করব
-                    data_to_save = DB_CACHE.copy() if DB_CACHE else {}
-                _save_db_to_api(data_to_save)
-                for _ in range(len(items)):
-                    SAVE_QUEUE.task_done()
-            else:
-                # পর্যায়ক্রমিক সেভ
-                with DB_LOCK:
-                    if DB_CACHE:
-                        _save_db_to_api(DB_CACHE.copy())
-        except Exception as e:
-            logger.error(f"Background saver error: {e}")
-        time.sleep(1)
-
-def load_db() -> Dict:
-    with DB_LOCK:
-        return DB_CACHE.copy() if DB_CACHE else {}
-
-def save_db(data: Dict) -> bool:
-    with DB_LOCK:
-        global DB_CACHE
-        DB_CACHE = data.copy()
-    SAVE_QUEUE.put(True)
-    return True
-
-def get_user_lang(user_id: int) -> str:
-    # ক্যাশে থাকলে সরাসরি রিটার্ন
-    if user_id in USER_LANG_CACHE:
-        return USER_LANG_CACHE[user_id]
-    # প্রথমবার লোড
-    db = load_db()
-    lang = db.get("users", {}).get(str(user_id), {}).get("lang", "en")
-    USER_LANG_CACHE[user_id] = lang
-    return lang
-
-def set_user_lang(user_id: int, lang: str) -> None:
-    # ক্যাশ আপডেট
-    USER_LANG_CACHE[user_id] = lang
-    # ডিবি আপডেট
-    with DB_LOCK:
-        if DB_CACHE is None:
-            init_db_cache()
-        if "users" not in DB_CACHE:
-            DB_CACHE["users"] = {}
-        if str(user_id) not in DB_CACHE["users"]:
-            DB_CACHE["users"][str(user_id)] = {"lang": lang, "first_seen": datetime.utcnow().isoformat()}
-            DB_CACHE["stats"]["total_users"] = DB_CACHE["stats"].get("total_users", 0) + 1
-        else:
-            DB_CACHE["users"][str(user_id)]["lang"] = lang
-    SAVE_QUEUE.put(True)
-
-def increment_command_count() -> None:
-    with DB_LOCK:
-        if DB_CACHE:
-            DB_CACHE["stats"]["total_commands"] = DB_CACHE["stats"].get("total_commands", 0) + 1
-    SAVE_QUEUE.put(True)
-
-def get_stats() -> Tuple[int, int]:
-    db = load_db()
-    stats = db.get("stats", {})
-    return stats.get("total_users", 0), stats.get("total_commands", 0)
-
-# ------------------------- USD/BDT রেট (ক্যাশ সহ) -------------------------
-def get_usd_bdt_rate() -> float:
-    now = time.time()
-    if now - RATE_CACHE["last_fetch"] < RATE_TTL:
-        return RATE_CACHE["rate"]
-    try:
-        resp = http_session.get(FRANKFURTER_API, timeout=3)
-        rate = resp.json()["rates"]["BDT"]
-        RATE_CACHE["rate"] = rate
-        RATE_CACHE["last_fetch"] = now
-        return rate
-    except:
-        # ক্যাশ ফিরত দাও
-        return RATE_CACHE["rate"]
-
 # ------------------------- API হেল্পার -------------------------
+def get_usd_bdt_rate() -> float:
+    global _usd_bdt_cache
+    now = time.time()
+    if now - _usd_bdt_cache["ts"] < 60:  # 60s cache
+        return _usd_bdt_cache["rate"]
+    try:
+        resp = requests.get(FRANKFURTER_API, timeout=2)
+        rate = resp.json()["rates"]["BDT"]
+        _usd_bdt_cache = {"rate": rate, "ts": now}
+        return rate
+    except Exception:
+        return _usd_bdt_cache["rate"]  # fallback to last known
+
 def search_coins(query: str) -> List[Dict]:
-    calls = [
-        ("GET", API_SOURCES["coingecko"]["search"].format(query=query), {}),
-        ("GET", API_SOURCES["coincap"]["search"].format(query=query), {}),
-        ("GET", API_SOURCES["coinpaprika"]["search"].format(query=query), {}),
-    ]
+    calls = []
+    for src in ["coingecko", "coincap", "coinpaprika"]:
+        endpoint = API_SOURCES[src]["search"]
+        if endpoint:
+            calls.append(("GET", endpoint.format(query=query), {}))
     data = fastest_request(calls)
     if not data:
         return []
@@ -363,20 +248,33 @@ def search_coins(query: str) -> List[Dict]:
     return []
 
 def get_coin_price(coin_id: str) -> Optional[Dict]:
-    calls = [
-        ("GET", API_SOURCES["coingecko"]["price"].format(id=coin_id), {}),
-        ("GET", API_SOURCES["coincap"]["price"].format(id=coin_id), {}),
-        ("GET", API_SOURCES["coinpaprika"]["price"].format(id=coin_id), {}),
-    ]
+    calls = []
+    # standard APIs
+    if coin_id.isalpha():  # coingecko
+        calls.append(("GET", API_SOURCES["coingecko"]["price"].format(id=coin_id), {}))
+    # coincap (alias usually lowercase, id can be different)
+    calls.append(("GET", API_SOURCES["coincap"]["price"].format(id=coin_id.lower()), {}))
+    # coinpaprika
+    calls.append(("GET", API_SOURCES["coinpaprika"]["price"].format(id=coin_id.lower()), {}))
+    # binance (ticker)
+    calls.append(("GET", API_SOURCES["binance"]["price"].format(id=coin_id.upper()), {}))
+    # kucoin
+    calls.append(("GET", API_SOURCES["kucoin"]["price"].format(id=coin_id.upper()), {}))
     data = fastest_request(calls)
     if not data:
         return None
+    # parse varying formats
     if coin_id in data and "usd" in data[coin_id]:
         return data[coin_id]
     elif "data" in data and "priceUsd" in data["data"]:
         return {"usd": float(data["data"]["priceUsd"])}
     elif "quotes" in data and "USD" in data["quotes"]:
         return {"usd": data["quotes"]["USD"]["price"]}
+    elif "price" in data:  # binance format
+        price = float(data["price"])
+        return {"usd": price}
+    elif "data" in data and "price" in data["data"]:  # kucoin
+        return {"usd": float(data["data"]["price"])}
     return None
 
 def get_top_coins(limit: int = 20) -> List[Dict]:
@@ -413,6 +311,63 @@ def get_top_coins(limit: int = 20) -> List[Dict]:
         return result
     return []
 
+# ------------------------- JSONBin ডাটাবেজ -------------------------
+def load_db() -> Dict:
+    headers = {
+        "X-Master-Key": JSONBIN_MASTER_KEY,
+        "X-Access-Key": JSONBIN_ACCESS_KEY
+    }
+    try:
+        response = requests.get(JSONBIN_URL, headers=headers, timeout=5)
+        response.raise_for_status()
+        return response.json().get("record", {})
+    except Exception as e:
+        logger.error(f"DB load error: {e}")
+        return {
+            "users": {},
+            "languages": ["bn", "en", "ru", "hi"],
+            "stats": {"total_users": 0, "total_commands": 0}
+        }
+
+def save_db(data: Dict) -> bool:
+    headers = {
+        "X-Master-Key": JSONBIN_MASTER_KEY,
+        "X-Access-Key": JSONBIN_ACCESS_KEY,
+        "Content-Type": "application/json"
+    }
+    try:
+        response = requests.put(JSONBIN_URL, headers=headers, json=data, timeout=5)
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        logger.error(f"DB save error: {e}")
+        return False
+
+def get_user_lang(user_id: int) -> str:
+    db = load_db()
+    return db.get("users", {}).get(str(user_id), {}).get("lang", "en")
+
+def set_user_lang(user_id: int, lang: str) -> None:
+    db = load_db()
+    if "users" not in db:
+        db["users"] = {}
+    if str(user_id) not in db["users"]:
+        db["users"][str(user_id)] = {"lang": lang, "first_seen": datetime.utcnow().isoformat()}
+        db["stats"]["total_users"] = db["stats"].get("total_users", 0) + 1
+    else:
+        db["users"][str(user_id)]["lang"] = lang
+    save_db(db)
+
+def increment_command_count() -> None:
+    db = load_db()
+    db["stats"]["total_commands"] = db["stats"].get("total_commands", 0) + 1
+    save_db(db)
+
+def get_stats() -> Tuple[int, int]:
+    db = load_db()
+    stats = db.get("stats", {})
+    return stats.get("total_users", 0), stats.get("total_commands", 0)
+
 # ------------------------- কনভার্টার -------------------------
 async def convert_currency(amount: float, from_cur: str, to_cur: str) -> Optional[float]:
     from_cur = from_cur.lower()
@@ -446,7 +401,7 @@ async def convert_currency(amount: float, from_cur: str, to_cur: str) -> Optiona
         return usd_amount / usd_price if usd_price != 0 else None
     return None
 
-# ------------------------- কীবোর্ড জেনারেটর -------------------------
+# ------------------------- কীবোর্ড জেনারেটর (অপরিবর্তিত) -------------------------
 def get_reply_keyboard(lang: str) -> ReplyKeyboardMarkup:
     t = TEXTS[lang]
     keyboard = [
@@ -486,7 +441,7 @@ def lang_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔙 Back", callback_data="start")]
     ])
 
-# ------------------------- হ্যান্ডলার -------------------------
+# ------------------------- হ্যান্ডলার (কোনো পরিবর্তন নেই) -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
@@ -627,6 +582,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
+    is_private = update.effective_chat.type == "private"
 
     if data == "start":
         await query.edit_message_text(t["welcome"], reply_markup=get_inline_menu(lang))
@@ -672,7 +628,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.edit_message_text(t["invalid_input"], reply_markup=back_keyboard_inline(lang))
 
-# ------------------------- মেসেজ হ্যান্ডলার (প্রাইভেট বাটন) -------------------------
+# ------------------------- মেসেজ হ্যান্ডলার -------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
@@ -712,7 +668,6 @@ def run_flask():
 
 # ------------------------- মেইন -------------------------
 def main():
-    init_db_cache()  # ডাটাবেজ মেমরিতে লোড
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
@@ -725,7 +680,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
-    logger.info("SUPERFAST bot started: in-memory DB, connection pooling, global executor, rate cache.")
+    logger.info("Bot started with multi-API race, dual keyboard, and Flask health check.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
