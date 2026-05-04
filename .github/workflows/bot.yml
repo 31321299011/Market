@@ -1,15 +1,19 @@
-name: 24/7 Infinite Relay Bot
+name: 24/7 Auto Runner
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
-  repository_dispatch:
-    types: [keep_alive] # আগের অ্যাকশন এই ইভেন্টকে কল করে নতুন অ্যাকশন চালু করবে
+  schedule:
+    - cron: '*/5 * * * *' # প্রতি ৫ মিনিট পর পর ব্যাকআপ চেক
 
 jobs:
-  run-bot:
+  bot-host:
     runs-on: ubuntu-latest
+    concurrency:
+      group: auto-bot-runner
+      cancel-in-progress: false # রানিং থাকলে নতুন করে স্টার্ট করে জ্যাম করবে না
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -18,24 +22,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install Dependencies
+      - name: Install Modules
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Run Bot and Trigger Next
+      - name: Run Bot Forever
         env:
           PYTHONUNBUFFERED: 1
         run: |
-          # বটকে ব্যাকগ্রাউন্ডে রান করা হচ্ছে
-          python main.py &
-          
-          # ঠিক ৫ ঘণ্টা (১৮০০০ সেকেন্ড) অপেক্ষা করবে
-          sleep 18000
-          
-          # ৫ ঘণ্টা পর API এর মাধ্যমে নতুন করে আরেকটি অ্যাকশন চালু করবে
-          curl -X POST https://api.github.com/repos/${{ github.repository }}/dispatches \
-          -H 'Accept: application/vnd.github.everest-preview+json' \
-          -H 'Authorization: token ${{ secrets.GH_PAT }}' \
-          --data '{"event_type": "keep_alive"}'
+          # এই লুপটি main.py কে অফ হতে দিবে না
+          while true; do
+            python main.py
+            echo "Bot crashed! Restarting in 1 second..."
+            sleep 1
+          done
+        timeout-minutes: 350
