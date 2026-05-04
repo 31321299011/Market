@@ -1,65 +1,41 @@
-name: CryptoMarketBot 24/7 Runner
+name: 24/7 Infinite Relay Bot
 
 on:
   push:
-    branches: [ main, master ]
-  workflow_dispatch:  # ম্যানুয়াল ট্রিগার
-  schedule:
-    - cron: '0 */5 * * *'  # প্রতি ৫ ঘণ্টায় রিস্টার্ট (GitHub 6hr limit bypass)
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false  # আগের রান ক্যানসেল না করে নতুন রান চালু
+    branches: [ main ]
+  workflow_dispatch:
+  repository_dispatch:
+    types: [keep_alive] # আগের অ্যাকশন এই ইভেন্টকে কল করে নতুন অ্যাকশন চালু করবে
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # ৫ ঘণ্টা ৫০ মিনিট (৬ ঘণ্টা লিমিটের আগে সেভ)
-
     steps:
-      - name: 📥 Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 📦 Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: 📥 Install Dependencies
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: 🚀 Run Bot (Auto-restart every 5 hours)
+      - name: Run Bot and Trigger Next
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          PYTHONUNBUFFERED: 1
         run: |
-          # ইনফিনিট লুপ - ক্র্যাশ হলে 10 সেকেন্ডে রিস্টার্ট
-          while true; do
-            echo "🤖 Starting bot at $(date)"
-            python bot.py
-            echo "⚠️ Bot crashed with exit code $?. Restarting in 10 seconds..."
-            sleep 10
-          done
-
-  # স্ট্যাটাস চেক
-  status-check:
-    runs-on: ubuntu-latest
-    needs: run-bot
-    if: always()
-    steps:
-      - name: 📊 Final Status
-        run: |
-          if [ "${{ needs.run-bot.result }}" == "success" ]; then
-            echo "✅ Bot completed normally (5hr cycle)"
-          else
-            echo "❌ Bot failed, check logs"
-          fi
+          # বটকে ব্যাকগ্রাউন্ডে রান করা হচ্ছে
+          python main.py &
+          
+          # ঠিক ৫ ঘণ্টা (১৮০০০ সেকেন্ড) অপেক্ষা করবে
+          sleep 18000
+          
+          # ৫ ঘণ্টা পর API এর মাধ্যমে নতুন করে আরেকটি অ্যাকশন চালু করবে
+          curl -X POST https://api.github.com/repos/${{ github.repository }}/dispatches \
+          -H 'Accept: application/vnd.github.everest-preview+json' \
+          -H 'Authorization: token ${{ secrets.GH_PAT }}' \
+          --data '{"event_type": "keep_alive"}'
