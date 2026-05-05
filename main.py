@@ -24,7 +24,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 # ------------------------- কনফিগারেশন -------------------------
-BOT_TOKEN = "8592158247:AAG_Bd1ZxdsPqgn5GuVRkCNP7jzJEVFXF-Q"
+BOT_TOKEN = "8592158247:AAE-14WkYiiGU-2Yn4imByF7eDsDEznMQoQ"
 
 # JSONBin কনফিগ (তোমার ডাটা)
 JSONBIN_MASTER_KEY = "$2a$10$Q.jxca3Wg3HLncJRJeBsF.XceuKNM6RFay0f3JE7WpalVC/G7I5S."
